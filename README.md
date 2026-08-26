@@ -7,6 +7,10 @@ Compose overrides and operational documentation.
 See [`infra/README.md`](infra/README.md) for architecture, storage contracts,
 commands and troubleshooting.
 
+For a clean Ubuntu 24.04 installation, GPU/Docker setup, repository cloning,
+configuration, smoke tests and daily operations, follow the
+[`INSTALLATION_GUIDE.md`](INSTALLATION_GUIDE.md).
+
 From the parent NeoVids workspace, the compatibility symlinks preserve the
 normal workflow:
 
