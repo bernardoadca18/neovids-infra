@@ -1,0 +1,11 @@
+services:
+  qwen-tts:
+    image: neovids-qwen-voice:local
+    networks:
+      neovids:
+        aliases: [qwen-voice]
+
+networks:
+  neovids:
+    name: ${NEOVIDS_NETWORK:-neovids}
+    external: true

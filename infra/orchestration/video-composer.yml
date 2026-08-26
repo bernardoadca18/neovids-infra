@@ -1,0 +1,13 @@
+services:
+  video-composer:
+    environment:
+      ORCHESTRATOR_BASE_URL: http://orchestrator-api:8000
+      MEDIA_INDEXER_BASE_URL: http://media-indexer:8000
+    networks:
+      neovids:
+        aliases: [video-composer]
+
+networks:
+  neovids:
+    name: ${NEOVIDS_NETWORK:-neovids}
+    external: true

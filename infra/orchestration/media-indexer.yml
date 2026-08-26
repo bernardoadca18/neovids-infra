@@ -1,0 +1,13 @@
+services:
+  api:
+    image: neovids-media-indexer:local
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    networks:
+      default: {}
+      neovids:
+        aliases: [media-indexer]
+
+networks:
+  neovids:
+    name: ${NEOVIDS_NETWORK:-neovids}
+    external: true

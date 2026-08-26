@@ -1,0 +1,29 @@
+services:
+  api:
+    image: neovids-orchestrator-backend:local
+    environment:
+      IDEAS_HUB_API_URL: http://ideas-hub:8000
+      VOICE_API_URL: http://qwen-voice:8889
+      MEDIA_INDEXER_API_URL: http://media-indexer:8000
+      VIDEO_COMPOSER_API_URL: http://video-composer:8013
+    networks:
+      default: {}
+      neovids:
+        aliases: [orchestrator-api]
+  worker:
+    image: neovids-orchestrator-backend:local
+    environment:
+      IDEAS_HUB_API_URL: http://ideas-hub:8000
+      VOICE_API_URL: http://qwen-voice:8889
+      MEDIA_INDEXER_API_URL: http://media-indexer:8000
+      VIDEO_COMPOSER_API_URL: http://video-composer:8013
+    networks:
+      default: {}
+      neovids: {}
+  frontend:
+    image: neovids-orchestrator-frontend:local
+
+networks:
+  neovids:
+    name: ${NEOVIDS_NETWORK:-neovids}
+    external: true

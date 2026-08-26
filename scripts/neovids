@@ -1,0 +1,506 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+INFRA_REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+ROOT_DIR="${NEOVIDS_WORKSPACE_ROOT:-$(cd "$INFRA_REPO_DIR/.." && pwd -P)}"
+NETWORK_NAME="${NEOVIDS_NETWORK:-neovids}"
+BACKUP_ROOT="${NEOVIDS_BACKUP_ROOT:-$HOME/backups/neovids}"
+
+usage() {
+  cat <<'EOF'
+Usage: ./scripts/neovids <command> [service]
+
+Commands:
+  doctor                 Safe, read-only host and dependency diagnostics
+  up                     Build missing images and start the complete stack
+  down                   Remove only NeoVids containers; preserve all data
+  restart [service]      Restart the stack or one application group
+  status [service]       Show Compose status
+  health                 Check host endpoints and external dependencies
+  logs [service]         Show the latest service logs
+  build                  Build application images using existing lockfiles
+
+Service groups: ideas-hub, media-indexer, qwen, video-composer, orchestrator
+EOF
+}
+
+compose() {
+  local group="$1"
+  shift
+  local repo project base override
+  case "$group" in
+    ideas-hub)
+      repo="ideas-hub"
+      project="ideas-hub"
+      base="docker-compose.yml"
+      override="ideas-hub.yml"
+      ;;
+    media-indexer)
+      repo="media-indexer"
+      project="media-indexer"
+      base="docker-compose.yml"
+      override="media-indexer.yml"
+      ;;
+    orchestrator)
+      repo="orchestrator"
+      project="orchestrator"
+      base="docker-compose.yml"
+      override="orchestrator.yml"
+      ;;
+    qwen)
+      repo="qwen3-tts-workshop"
+      project="qwen3-tts-workshop"
+      base="docker-compose.yaml"
+      override="qwen3-tts-workshop.yml"
+      ;;
+    video-composer)
+      repo="video-composer"
+      project="video-composer"
+      base="docker-compose.yml"
+      override="video-composer.yml"
+      ;;
+    *)
+      printf 'Unknown service group: %s\n' "$group" >&2
+      return 2
+      ;;
+  esac
+  (
+    cd "$ROOT_DIR/$repo"
+    NEOVIDS_NETWORK="$NETWORK_NAME" docker compose \
+      --project-name "$project" \
+      --file "$base" \
+      --file "$INFRA_REPO_DIR/infra/orchestration/$override" \
+      "$@"
+  )
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || {
+    printf 'Required command is unavailable: %s\n' "$1" >&2
+    return 1
+  }
+}
+
+require_docker() {
+  require_command docker
+  docker info >/dev/null 2>&1 || {
+    printf 'Docker daemon is unavailable.\n' >&2
+    return 1
+  }
+}
+
+required_volumes() {
+  printf '%s\n' \
+    ideas-hub-db-data \
+    media-indexer_media-indexer-db-data \
+    media-indexer_media-indexer-model-cache \
+    orchestrator-db-data \
+    video-composer_video-composer-data
+}
+
+verify_volume_identity() {
+  local missing=0 volume
+  while IFS= read -r volume; do
+    if docker volume inspect "$volume" >/dev/null 2>&1; then
+      printf 'volume %-52s OK\n' "$volume"
+    else
+      printf 'volume %-52s MISSING\n' "$volume" >&2
+      missing=1
+    fi
+  done < <(required_volumes)
+  if ((missing)); then
+    printf 'Refusing startup: an established durable volume is missing.\n' >&2
+    return 1
+  fi
+}
+
+verify_bind_mounts() {
+  local missing=0 path
+  local paths=(
+    "$ROOT_DIR/media-indexer/storage"
+    "$ROOT_DIR/orchestrator/data/audio"
+    "$ROOT_DIR/orchestrator/cache/huggingface"
+    "$ROOT_DIR/qwen3-tts-workshop/cache/huggingface"
+    "$ROOT_DIR/qwen3-tts-workshop/data/references"
+    "$ROOT_DIR/qwen3-tts-workshop/data/jobs"
+    "$ROOT_DIR/qwen3-tts-workshop/data/outputs"
+  )
+  for path in "${paths[@]}"; do
+    if [[ -d "$path" ]]; then
+      printf 'bind   %-52s OK\n' "${path#"$ROOT_DIR/"}"
+    else
+      printf 'bind   %-52s MISSING\n' "${path#"$ROOT_DIR/"}" >&2
+      missing=1
+    fi
+  done
+  return "$missing"
+}
+
+ensure_network() {
+  if docker network inspect "$NETWORK_NAME" >/dev/null 2>&1; then
+    local driver
+    driver="$(docker network inspect "$NETWORK_NAME" --format '{{.Driver}}')"
+    [[ "$driver" == "bridge" ]] || {
+      printf 'Existing network %s uses unexpected driver %s.\n' "$NETWORK_NAME" "$driver" >&2
+      return 1
+    }
+    return
+  fi
+  docker network create \
+    --driver bridge \
+    --label com.neovids.managed=true \
+    "$NETWORK_NAME" >/dev/null
+  printf 'Created shared application network: %s\n' "$NETWORK_NAME"
+}
+
+container_id() {
+  compose "$1" ps --quiet "$2"
+}
+
+wait_container_health() {
+  local label="$1" container="$2" timeout="$3"
+  local deadline=$((SECONDS + timeout)) state
+  while ((SECONDS < deadline)); do
+    state="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container" 2>/dev/null || true)"
+    if [[ "$state" == "healthy" || "$state" == "running" ]]; then
+      printf '%-24s READY\n' "$label"
+      return
+    fi
+    if [[ "$state" == "unhealthy" || "$state" == "exited" || "$state" == "dead" ]]; then
+      printf '%s failed with container state %s.\n' "$label" "$state" >&2
+      docker logs --tail 60 "$container" >&2 || true
+      return 1
+    fi
+    sleep 1
+  done
+  printf '%s did not become healthy within %ss.\n' "$label" "$timeout" >&2
+  docker logs --tail 60 "$container" >&2 || true
+  return 1
+}
+
+wait_http() {
+  local label="$1" url="$2" timeout="$3"
+  local deadline=$((SECONDS + timeout))
+  while ((SECONDS < deadline)); do
+    if curl --fail --silent --show-error --max-time 5 "$url" >/dev/null 2>&1; then
+      printf '%-24s READY\n' "$label"
+      return
+    fi
+    sleep 2
+  done
+  printf '%s did not become ready at %s within %ss.\n' "$label" "$url" "$timeout" >&2
+  return 1
+}
+
+database_count() {
+  local container="$1" table="$2"
+  docker exec "$container" sh -ceu \
+    'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "$1"' \
+    sh "select count(1) from $table"
+}
+
+verify_database_contents() {
+  local ideas_db media_db orchestrator_db
+  ideas_db="$(container_id ideas-hub db)"
+  media_db="$(container_id media-indexer db)"
+  orchestrator_db="$(container_id orchestrator db)"
+  [[ -n "$ideas_db" && -n "$media_db" && -n "$orchestrator_db" ]]
+
+  printf 'Ideas Hub ideias=%s\n' "$(database_count "$ideas_db" ideias)"
+  printf 'Media Indexer sessions=%s\n' "$(database_count "$media_db" media_sessions)"
+  printf 'Orchestrator workflows=%s\n' "$(database_count "$orchestrator_db" workflow_execucoes)"
+}
+
+backup_databases() {
+  local destination timestamp ideas_db media_db orchestrator_db
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  destination="$BACKUP_ROOT/$timestamp"
+  umask 077
+  mkdir -p "$destination"
+  ideas_db="$(container_id ideas-hub db)"
+  media_db="$(container_id media-indexer db)"
+  orchestrator_db="$(container_id orchestrator db)"
+  docker exec "$ideas_db" sh -ceu \
+    'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' \
+    >"$destination/ideas-hub.dump"
+  docker exec "$media_db" sh -ceu \
+    'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' \
+    >"$destination/media-indexer.dump"
+  docker exec "$orchestrator_db" sh -ceu \
+    'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' \
+    >"$destination/orchestrator.dump"
+  printf 'Database backups: %s\n' "$destination"
+}
+
+image_missing() {
+  ! docker image inspect "$1" >/dev/null 2>&1
+}
+
+build_missing_images() {
+  if image_missing neovids-ideas-hub-backend:local || \
+    image_missing neovids-ideas-hub-frontend:local; then
+    compose ideas-hub build backend frontend
+  fi
+  if image_missing neovids-media-indexer:local; then
+    compose media-indexer build api
+  fi
+  if image_missing neovids-qwen-voice:local; then
+    compose qwen build qwen-tts
+  fi
+  if image_missing neovids-video-composer:stage16; then
+    compose video-composer build video-composer
+  fi
+  if image_missing neovids-orchestrator-backend:local || \
+    image_missing neovids-orchestrator-frontend:local; then
+    compose orchestrator build api frontend
+  fi
+}
+
+build_all() {
+  require_docker
+  ensure_network
+  compose ideas-hub build backend frontend
+  compose media-indexer build api
+  compose qwen build qwen-tts
+  compose video-composer build video-composer
+  compose orchestrator build api frontend
+}
+
+run_migrations() {
+  compose ideas-hub run --rm --no-deps backend env PYTHONPATH=/app alembic upgrade head
+  compose media-indexer run --rm --no-deps api env PYTHONPATH=/app alembic upgrade head
+  compose orchestrator run --rm --no-deps api env PYTHONPATH=/app alembic upgrade head
+}
+
+up_stack() {
+  require_docker
+  require_command curl
+  verify_volume_identity
+  verify_bind_mounts
+  ensure_network
+
+  compose ideas-hub up --detach db
+  compose media-indexer up --detach db
+  compose orchestrator up --detach db redis
+  wait_container_health "Ideas Hub PostgreSQL" "$(container_id ideas-hub db)" 90
+  wait_container_health "Media PostgreSQL" "$(container_id media-indexer db)" 90
+  wait_container_health "Orchestrator PostgreSQL" "$(container_id orchestrator db)" 90
+  wait_container_health "Orchestrator Redis" "$(container_id orchestrator redis)" 60
+  verify_database_contents
+  backup_databases
+
+  build_missing_images
+  run_migrations
+
+  compose ideas-hub up --detach --no-build backend frontend
+  wait_http "Ideas Hub API" "http://127.0.0.1:8000/health/ready" 120
+  wait_http "Ideas Hub frontend" "http://127.0.0.1:5173" 120
+
+  compose media-indexer up --detach --no-build api
+  wait_http "Media Indexer" "http://127.0.0.1:8012/health/ready" 180
+
+  compose qwen up --detach --no-build qwen-tts
+  wait_http "Qwen liveness" "http://127.0.0.1:8889/health/live" 180
+  wait_http "Qwen readiness" "http://127.0.0.1:8889/health/ready" 900
+
+  compose video-composer up --detach --no-build video-composer
+  wait_http "Video Composer" "http://127.0.0.1:8013/health/ready" 300
+
+  compose orchestrator up --detach --no-build api worker frontend
+  wait_http "Orchestrator API" "http://127.0.0.1:8011/health/live" 180
+  wait_container_health "Orchestrator worker" "$(container_id orchestrator worker)" 180
+  wait_http "Orchestrator frontend" "http://127.0.0.1:5174" 180
+  wait_http "Orchestrator readiness" "http://127.0.0.1:8011/health/ready" 120
+
+  health_stack
+  status_stack
+}
+
+down_stack() {
+  require_docker
+  compose orchestrator down --remove-orphans
+  compose video-composer down --remove-orphans
+  compose qwen down --remove-orphans
+  compose media-indexer down --remove-orphans
+  compose ideas-hub down --remove-orphans
+  printf 'NeoVids containers stopped and removed. Persistent volumes were preserved.\n'
+}
+
+status_group() {
+  printf '\n[%s]\n' "$1"
+  compose "$1" ps
+}
+
+status_stack() {
+  local selected="${1:-}"
+  if [[ -n "$selected" ]]; then
+    status_group "$selected"
+    return
+  fi
+  status_group ideas-hub
+  status_group media-indexer
+  status_group qwen
+  status_group video-composer
+  status_group orchestrator
+}
+
+check_url() {
+  local label="$1" url="$2" required="${3:-true}"
+  local result
+  result="$(curl --silent --show-error --output /dev/null \
+    --write-out '%{http_code} %{time_total}' --max-time 8 "$url" 2>/dev/null || true)"
+  if [[ "$result" == 2* ]]; then
+    printf '%-24s READY       %s\n' "$label" "$result"
+    return
+  fi
+  printf '%-24s UNAVAILABLE %s\n' "$label" "${result:-connection_failed}"
+  [[ "$required" != "true" ]]
+}
+
+report_port() {
+  local port="$1" label="$2"
+  if ss --tcp --listening --numeric "sport = :$port" | tail -n +2 | grep -q .; then
+    printf 'port %-5s %-30s LISTENING\n' "$port" "$label"
+  else
+    printf 'port %-5s %-30s FREE\n' "$port" "$label"
+  fi
+}
+
+health_stack() {
+  require_command curl
+  local failed=0
+  check_url "LiteLLM (external)" "http://127.0.0.1:4000/health/readiness" || failed=1
+  check_url "Ollama (external)" "http://127.0.0.1:11434/api/tags" false || true
+  check_url "Ideas Hub" "http://127.0.0.1:8000/health/ready" || failed=1
+  check_url "Media Indexer" "http://127.0.0.1:8012/health/ready" || failed=1
+  check_url "Qwen Voice" "http://127.0.0.1:8889/health/ready" || failed=1
+  check_url "Video Composer" "http://127.0.0.1:8013/health/ready" || failed=1
+  check_url "Orchestrator" "http://127.0.0.1:8011/health/ready" || failed=1
+  check_url "Ideas Hub frontend" "http://127.0.0.1:5173" || failed=1
+  check_url "Orchestrator frontend" "http://127.0.0.1:5174" || failed=1
+  return "$failed"
+}
+
+doctor() {
+  local failed=0 current=0 group count
+  printf 'NeoVids doctor (read-only)\n'
+  require_docker || failed=1
+  if ((failed)); then
+    return "$failed"
+  fi
+  verify_volume_identity || failed=1
+  verify_bind_mounts || failed=1
+  if docker network inspect "$NETWORK_NAME" >/dev/null 2>&1; then
+    printf 'network %-51s PRESENT\n' "$NETWORK_NAME"
+  else
+    printf 'network %-51s ABSENT (created by up)\n' "$NETWORK_NAME"
+  fi
+  printf '\nDisk:\n'
+  df -h "$ROOT_DIR" | tail -n 1
+  printf '\nMemory:\n'
+  free -h | sed -n '1,3p'
+  printf '\nGPU:\n'
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi --query-gpu=name,memory.total,memory.used,utilization.gpu \
+      --format=csv,noheader,nounits || failed=1
+  else
+    printf 'nvidia-smi unavailable\n'
+    failed=1
+  fi
+  printf '\nExternal dependencies:\n'
+  check_url "LiteLLM" "http://127.0.0.1:4000/health/readiness" || failed=1
+  check_url "Ollama" "http://127.0.0.1:11434/api/tags" false || true
+  printf '\nHost ports:\n'
+  report_port 8000 "Ideas Hub API"
+  report_port 5173 "Ideas Hub frontend"
+  report_port 5432 "Ideas Hub PostgreSQL"
+  report_port 8012 "Media Indexer API"
+  report_port 5435 "Media Indexer PostgreSQL"
+  report_port 8889 "Qwen Voice"
+  report_port 8013 "Video Composer"
+  report_port 8011 "Orchestrator API"
+  report_port 5174 "Orchestrator frontend"
+  report_port 5434 "Orchestrator PostgreSQL"
+  report_port 6380 "Orchestrator Redis"
+  printf '\nApplication endpoints (informational before up):\n'
+  check_url "Ideas Hub" "http://127.0.0.1:8000/health/live" false || true
+  check_url "Media Indexer" "http://127.0.0.1:8012/health/live" false || true
+  check_url "Qwen Voice" "http://127.0.0.1:8889/health/live" false || true
+  check_url "Video Composer" "http://127.0.0.1:8013/health/live" false || true
+  check_url "Orchestrator" "http://127.0.0.1:8011/health/live" false || true
+  for group in ideas-hub media-indexer orchestrator qwen3-tts-workshop video-composer; do
+    count="$(docker ps --all --filter "label=com.docker.compose.project=$group" --quiet | wc -l)"
+    current=$((current + count))
+  done
+  printf '\nNeoVids containers currently present: %s\n' "$current"
+  return "$failed"
+}
+
+logs_group() {
+  compose "$1" logs --tail 200
+}
+
+logs_stack() {
+  local selected="${1:-}"
+  if [[ -n "$selected" ]]; then
+    logs_group "$selected"
+    return
+  fi
+  logs_group ideas-hub
+  logs_group media-indexer
+  logs_group qwen
+  logs_group video-composer
+  logs_group orchestrator
+}
+
+restart_group() {
+  case "$1" in
+    ideas-hub)
+      compose ideas-hub restart backend frontend
+      wait_http "Ideas Hub API" "http://127.0.0.1:8000/health/ready" 120
+      wait_http "Ideas Hub frontend" "http://127.0.0.1:5173" 120
+      ;;
+    media-indexer)
+      compose media-indexer restart api
+      wait_http "Media Indexer" "http://127.0.0.1:8012/health/ready" 180
+      ;;
+    qwen)
+      compose qwen restart qwen-tts
+      wait_http "Qwen liveness" "http://127.0.0.1:8889/health/live" 180
+      wait_http "Qwen readiness" "http://127.0.0.1:8889/health/ready" 900
+      ;;
+    video-composer)
+      compose video-composer restart video-composer
+      wait_http "Video Composer" "http://127.0.0.1:8013/health/ready" 300
+      ;;
+    orchestrator)
+      compose orchestrator restart api worker frontend
+      wait_http "Orchestrator API" "http://127.0.0.1:8011/health/live" 180
+      wait_container_health "Orchestrator worker" "$(container_id orchestrator worker)" 180
+      wait_http "Orchestrator frontend" "http://127.0.0.1:5174" 180
+      wait_http "Orchestrator readiness" "http://127.0.0.1:8011/health/ready" 120
+      ;;
+    *) printf 'Unknown service group: %s\n' "$1" >&2; return 2 ;;
+  esac
+}
+
+main() {
+  local command="${1:-}"
+  case "$command" in
+    doctor) doctor ;;
+    up) up_stack ;;
+    down) down_stack ;;
+    restart)
+      if [[ -n "${2:-}" ]]; then restart_group "$2"; else down_stack; up_stack; fi
+      ;;
+    status) status_stack "${2:-}" ;;
+    health) health_stack ;;
+    logs) logs_stack "${2:-}" ;;
+    build) build_all ;;
+    -h|--help|help|"") usage ;;
+    *) usage >&2; return 2 ;;
+  esac
+}
+
+main "$@"
