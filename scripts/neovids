@@ -9,11 +9,11 @@ BACKUP_ROOT="${NEOVIDS_BACKUP_ROOT:-$HOME/backups/neovids}"
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/neovids <command> [service]
+Usage: ./scripts/neovids <command> [service|option]
 
 Commands:
   doctor                 Safe, read-only host and dependency diagnostics
-  up                     Build missing images and start the complete stack
+  up [--build]           Start the stack; optionally rebuild all images first
   down                   Remove only NeoVids containers; preserve all data
   restart [service]      Restart the stack or one application group
   status [service]       Show Compose status
@@ -113,6 +113,62 @@ verify_volume_identity() {
     printf 'Refusing startup: an established durable volume is missing.\n' >&2
     return 1
   fi
+}
+
+detect_installation_mode() {
+  local present=0 total=0 volume
+  while IFS= read -r volume; do
+    total=$((total + 1))
+    if docker volume inspect "$volume" >/dev/null 2>&1; then
+      present=$((present + 1))
+    fi
+  done < <(required_volumes)
+
+  if ((present == total)); then
+    INSTALLATION_MODE="existing"
+  elif ((present == 0)); then
+    INSTALLATION_MODE="fresh"
+  else
+    INSTALLATION_MODE="partial"
+  fi
+}
+
+prepare_installation() {
+  detect_installation_mode
+  case "$INSTALLATION_MODE" in
+    existing)
+      printf 'installation %-47s EXISTING\n' "NeoVids durable state"
+      verify_volume_identity
+      verify_bind_mounts
+      ;;
+    fresh)
+      printf 'installation %-47s FRESH\n' "NeoVids durable state"
+      printf 'Compose will create the five canonical named volumes.\n'
+      initialize_fresh_bind_mounts
+      ;;
+    partial)
+      printf 'installation %-47s PARTIAL / AMBIGUOUS\n' "NeoVids durable state" >&2
+      verify_volume_identity || true
+      printf 'Refusing startup: restore the missing established volumes or remove ambiguity manually.\n' >&2
+      return 1
+      ;;
+  esac
+}
+
+initialize_fresh_bind_mounts() {
+  local paths=(
+    "$ROOT_DIR/media-indexer/storage"
+    "$ROOT_DIR/orchestrator/data/audio"
+    "$ROOT_DIR/orchestrator/cache/huggingface"
+    "$ROOT_DIR/qwen3-tts-workshop/cache/huggingface"
+    "$ROOT_DIR/qwen3-tts-workshop/data/jobs"
+    "$ROOT_DIR/qwen3-tts-workshop/data/outputs"
+  )
+  local path
+  for path in "${paths[@]}"; do
+    mkdir -p "$path"
+  done
+  verify_bind_mounts
 }
 
 verify_bind_mounts() {
@@ -233,6 +289,45 @@ backup_databases() {
   printf 'Database backups: %s\n' "$destination"
 }
 
+migration_is_current() {
+  local group="$1" service="$2" output
+  if ! output="$(compose "$group" run --rm --no-deps "$service" \
+    env PYTHONPATH=/app alembic current 2>&1)"; then
+    printf 'Unable to inspect %s migration state:\n%s\n' "$group" "$output" >&2
+    return 2
+  fi
+  grep -q '(head)' <<<"$output"
+}
+
+detect_pending_migrations() {
+  PENDING_MIGRATIONS=()
+  local status
+  if migration_is_current ideas-hub backend; then
+    printf 'migration %-50s CURRENT\n' "ideas-hub"
+  else
+    status=$?
+    ((status == 1)) || return "$status"
+    PENDING_MIGRATIONS+=("ideas-hub:backend")
+    printf 'migration %-50s PENDING\n' "ideas-hub"
+  fi
+  if migration_is_current media-indexer api; then
+    printf 'migration %-50s CURRENT\n' "media-indexer"
+  else
+    status=$?
+    ((status == 1)) || return "$status"
+    PENDING_MIGRATIONS+=("media-indexer:api")
+    printf 'migration %-50s PENDING\n' "media-indexer"
+  fi
+  if migration_is_current orchestrator api; then
+    printf 'migration %-50s CURRENT\n' "orchestrator"
+  else
+    status=$?
+    ((status == 1)) || return "$status"
+    PENDING_MIGRATIONS+=("orchestrator:api")
+    printf 'migration %-50s PENDING\n' "orchestrator"
+  fi
+}
+
 image_missing() {
   ! docker image inspect "$1" >/dev/null 2>&1
 }
@@ -267,17 +362,25 @@ build_all() {
   compose orchestrator build api frontend
 }
 
-run_migrations() {
-  compose ideas-hub run --rm --no-deps backend env PYTHONPATH=/app alembic upgrade head
-  compose media-indexer run --rm --no-deps api env PYTHONPATH=/app alembic upgrade head
-  compose orchestrator run --rm --no-deps api env PYTHONPATH=/app alembic upgrade head
+run_pending_migrations() {
+  local entry group service
+  for entry in "${PENDING_MIGRATIONS[@]}"; do
+    group="${entry%%:*}"
+    service="${entry##*:}"
+    compose "$group" run --rm --no-deps "$service" \
+      env PYTHONPATH=/app alembic upgrade head
+  done
 }
 
 up_stack() {
+  local option="${1:-}"
+  if [[ -n "$option" && "$option" != "--build" ]]; then
+    printf 'Unknown up option: %s\n' "$option" >&2
+    return 2
+  fi
   require_docker
   require_command curl
-  verify_volume_identity
-  verify_bind_mounts
+  prepare_installation
   ensure_network
 
   compose ideas-hub up --detach db
@@ -287,11 +390,28 @@ up_stack() {
   wait_container_health "Media PostgreSQL" "$(container_id media-indexer db)" 90
   wait_container_health "Orchestrator PostgreSQL" "$(container_id orchestrator db)" 90
   wait_container_health "Orchestrator Redis" "$(container_id orchestrator redis)" 60
-  verify_database_contents
-  backup_databases
+  if [[ "$INSTALLATION_MODE" == "existing" ]]; then
+    verify_database_contents
+  fi
 
-  build_missing_images
-  run_migrations
+  if [[ "$option" == "--build" ]]; then
+    build_all
+  else
+    build_missing_images
+  fi
+
+  if [[ "$INSTALLATION_MODE" == "fresh" ]]; then
+    PENDING_MIGRATIONS=("ideas-hub:backend" "media-indexer:api" "orchestrator:api")
+    printf 'Fresh installation: initializing database schemas without backup.\n'
+  else
+    detect_pending_migrations
+    if ((${#PENDING_MIGRATIONS[@]})); then
+      backup_databases
+    else
+      printf 'No pending migrations; database backup and migration steps skipped.\n'
+    fi
+  fi
+  run_pending_migrations
 
   compose ideas-hub up --detach --no-build backend frontend
   wait_http "Ideas Hub API" "http://127.0.0.1:8000/health/ready" 120
@@ -389,8 +509,22 @@ doctor() {
   if ((failed)); then
     return "$failed"
   fi
-  verify_volume_identity || failed=1
-  verify_bind_mounts || failed=1
+  detect_installation_mode
+  case "$INSTALLATION_MODE" in
+    existing)
+      printf 'installation %-47s EXISTING\n' "NeoVids durable state"
+      verify_volume_identity || failed=1
+      verify_bind_mounts || failed=1
+      ;;
+    fresh)
+      printf 'installation %-47s FRESH (bootstrapped by up)\n' "NeoVids durable state"
+      ;;
+    partial)
+      printf 'installation %-47s PARTIAL / AMBIGUOUS\n' "NeoVids durable state" >&2
+      verify_volume_identity || true
+      failed=1
+      ;;
+  esac
   if docker network inspect "$NETWORK_NAME" >/dev/null 2>&1; then
     printf 'network %-51s PRESENT\n' "$NETWORK_NAME"
   else
@@ -489,7 +623,10 @@ main() {
   local command="${1:-}"
   case "$command" in
     doctor) doctor ;;
-    up) up_stack ;;
+    up)
+      [[ $# -le 2 ]] || { usage >&2; return 2; }
+      up_stack "${2:-}"
+      ;;
     down) down_stack ;;
     restart)
       if [[ -n "${2:-}" ]]; then restart_group "$2"; else down_stack; up_stack; fi
@@ -503,4 +640,6 @@ main() {
   esac
 }
 
-main "$@"
+if [[ "${NEOVIDS_LIB_ONLY:-0}" != "1" ]]; then
+  main "$@"
+fi

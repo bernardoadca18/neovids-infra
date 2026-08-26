@@ -24,13 +24,19 @@ From `/home/bernardo/workspaces/neovids`:
 ./scripts/neovids down
 ```
 
-`up` works from a cold image/cache state. It validates established volume and
+`up` works from a cold image/cache state. It validates installation mode and
 bind-mount identities, creates the external `neovids` network when absent,
 starts only the three application databases and Orchestrator Redis, verifies
-representative existing table contents, writes logical PostgreSQL backups
-outside Git/volumes, builds missing images, applies migrations, and starts APIs
-in dependency order. Readiness polling is bounded; fixed sleeps are not used as
-the primary gate.
+representative existing table contents, builds missing images, inspects Alembic
+state, and starts APIs in dependency order. When at least one database has a
+pending migration, it writes logical PostgreSQL backups outside Git/volumes
+before upgrading. A normal current startup does not create another full dump.
+Readiness polling is bounded; fixed sleeps are not used as the primary gate.
+
+Use `./scripts/neovids up --build` after source or dependency changes that must
+be copied into images. Plain `up` builds only missing images and intentionally
+does not guess whether an existing image is stale. `./scripts/neovids build`
+rebuilds all application images without starting the stack.
 
 `down` executes project-scoped `docker compose down --remove-orphans` in reverse
 dependency order. It never passes `-v`, never prunes, leaves the external
@@ -113,6 +119,38 @@ Compose project names are explicit in the CLI so implicit Media Indexer and
 Composer volume names cannot drift. Backups default to
 `$HOME/backups/neovids/<UTC timestamp>` with mode-restricted files. Set
 `NEOVIDS_BACKUP_ROOT` to another non-repository path if needed.
+
+## Installation modes
+
+The five canonical named volumes form one installation identity:
+
+- **existing**: all five exist; startup verifies representative database
+  content and reuses them;
+- **fresh**: none exists; `up` creates exactly those canonical volumes and
+  initializes schemas without making meaningless empty-database backups;
+- **partial/ambiguous**: only some exist; startup fails closed before starting
+  databases or creating replacements.
+
+Fresh bootstrap creates only the known writable bind directories. Qwen's
+version-controlled reference WAV/text must still be present, and service-local
+`.env` configuration remains the operator's responsibility. Never remove real
+volumes to test bootstrap behavior; the CLI's shell tests use a fake Docker
+boundary.
+
+Backups are never deleted automatically. Review `$NEOVIDS_BACKUP_ROOT`
+periodically and move or remove obsolete timestamped sets only after an
+operator confirms their retention requirements.
+
+## Source changes and builds
+
+| Service | Development source behavior | Rebuild for a durable image |
+| --- | --- | --- |
+| Ideas Hub backend | source is copied into the image | `up --build` or `build` |
+| Ideas Hub frontend | `src` is bind-mounted in local Compose; dependencies are in the image | rebuild after dependency/Dockerfile changes |
+| Media Indexer | source is copied into the image | `up --build` or `build` |
+| Qwen Voice | runtime source/config are copied into the image; data/cache are mounted | `up --build` or `build` |
+| Video Composer | source is copied into the image | `up --build` or `build` |
+| Orchestrator backend/frontend | repository source is bind-mounted in local Compose | rebuild after dependency/Dockerfile changes |
 
 Never use `docker compose down -v`, `docker volume prune`, `docker system
 prune`, or broad host-wide cleanup as part of normal NeoVids operation. Safe
