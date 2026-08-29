@@ -217,6 +217,25 @@ container_id() {
   compose "$1" ps --quiet "$2"
 }
 
+validate_qwen_topology() {
+  local container topology
+  container="$(container_id qwen qwen-tts)"
+  if [[ -z "$container" ]]; then
+    printf 'Qwen topology validation failed: qwen-tts container is absent.\n' >&2
+    return 1
+  fi
+  topology="$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$container")"
+  if [[ "$topology" != *\"$NETWORK_NAME\":* ]]; then
+    printf 'Qwen topology validation failed: network %s is absent.\n' "$NETWORK_NAME" >&2
+    return 1
+  fi
+  if [[ "$topology" != *\"qwen-voice\"* ]]; then
+    printf 'Qwen topology validation failed: alias qwen-voice is absent.\n' >&2
+    return 1
+  fi
+  printf '%-24s READY (network=%s alias=qwen-voice)\n' "Qwen topology" "$NETWORK_NAME"
+}
+
 wait_container_health() {
   local label="$1" container="$2" timeout="$3"
   local deadline=$((SECONDS + timeout)) state
@@ -424,6 +443,7 @@ up_stack() {
   wait_http "Media Indexer" "http://127.0.0.1:8012/health/ready" 180
 
   compose qwen up --detach --no-build qwen-tts
+  validate_qwen_topology
   wait_http "Qwen liveness" "http://127.0.0.1:8889/health/live" 180
   wait_http "Qwen readiness" "http://127.0.0.1:8889/health/ready" 900
 
@@ -504,6 +524,7 @@ health_stack() {
   check_url "Ideas Hub" "http://127.0.0.1:8000/health/ready" || failed=1
   check_url "Media Indexer" "http://127.0.0.1:8012/health/ready" || failed=1
   check_url "Qwen Voice" "http://127.0.0.1:8889/health/ready" || failed=1
+  validate_qwen_topology || failed=1
   check_url "Video Composer" "http://127.0.0.1:8013/health/ready" || failed=1
   check_url "Orchestrator" "http://127.0.0.1:8011/health/ready" || failed=1
   check_url "Ideas Hub frontend" "http://127.0.0.1:5173" || failed=1
@@ -610,6 +631,7 @@ restart_group() {
       ;;
     qwen)
       compose qwen restart qwen-tts
+      validate_qwen_topology
       wait_http "Qwen liveness" "http://127.0.0.1:8889/health/live" 180
       wait_http "Qwen readiness" "http://127.0.0.1:8889/health/ready" 900
       ;;

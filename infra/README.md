@@ -34,11 +34,20 @@ state, and starts APIs in dependency order. When at least one database has a
 pending migration, it writes logical PostgreSQL backups outside Git/volumes
 before upgrading. A normal current startup does not create another full dump.
 Readiness polling is bounded; fixed sleeps are not used as the primary gate.
+After Qwen is created, the CLI also inspects the live container and fails fast unless it is attached
+to the external `neovids` network with the `qwen-voice` alias used by the Orchestrator.
 
 Use `./scripts/neovids up --build` after source or dependency changes that must
 be copied into images. Plain `up` builds only missing images and intentionally
 does not guess whether an existing image is stale. `./scripts/neovids build`
 rebuilds all application images without starting the stack.
+
+In integrated NeoVids mode, do not recreate Qwen with its repository-local Compose file alone:
+that file deliberately remains independently operable and does not own the cross-repository
+backplane. Use `./scripts/neovids up --build`; it always merges
+`infra/orchestration/qwen3-tts-workshop.yml`, preserves the external `neovids` network and the
+`qwen-voice` alias, and validates the effective topology. `./scripts/neovids restart qwen` is safe
+for an already integrated container and performs the same post-restart validation.
 
 `down` executes project-scoped `docker compose down --remove-orphans` in reverse
 dependency order. It never passes `-v`, never prunes, leaves the external
