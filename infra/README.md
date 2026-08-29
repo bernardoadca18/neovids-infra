@@ -19,6 +19,8 @@ From `/home/bernardo/workspaces/neovids`:
 ./scripts/neovids doctor
 ./scripts/neovids up
 ./scripts/neovids status
+./scripts/neovids resources
+./scripts/neovids resources --json
 ./scripts/neovids health
 ./scripts/neovids logs media-indexer
 ./scripts/neovids down
@@ -168,9 +170,9 @@ model caches, media storage, outputs, coverage, Git metadata, and local secrets.
 ## GPU and model lifecycle
 
 Qwen is the canonical voice service. It loads one pinned model through FastAPI
-lifespan, caches voice prompts, owns one bounded serial GPU worker, and receives
-30 minutes for graceful shutdown. Media Indexer keeps Faster-Whisper lazy and
-reuses one loaded model per process. Root orchestration controls when these
+lifespan, pins registered prompts, bounds ephemeral prompts with an LRU, owns one serial GPU worker,
+and receives 30 minutes for graceful shutdown. Media Indexer keeps Faster-Whisper lazy with an
+explicit resident/per-job lifetime policy. Root orchestration controls when these
 services run; it does not change model, revision, precision, sampling, ASR beam,
 frame quality, render profile, or any Stage 1-18 production semantics.
 
@@ -188,6 +190,13 @@ changing FFmpeg/Remotion output.
 
 `./scripts/neovids logs` returns the latest 200 lines rather than following all
 services indefinitely. Pass a service group to narrow output.
+
+`./scripts/neovids resources` is read-only. It reports host RAM/swap, NeoVids Compose container
+CPU/memory/current state and configured limits, NVIDIA memory/utilization/compute processes, disk
+capacity and per-repository disk usage. `--json` emits the versioned `neovids_resources_v1`
+snapshot; `--watch [seconds]` repeats it without mutating containers or workloads. Missing Docker,
+`nvidia-smi` or individual measurements are represented as unavailable instead of aborting the
+entire snapshot or pretending the value is zero.
 
 ## Cold recovery and troubleshooting
 

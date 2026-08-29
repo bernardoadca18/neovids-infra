@@ -17,11 +17,14 @@ Commands:
   down                   Remove only NeoVids containers; preserve all data
   restart [service]      Restart the stack or one application group
   status [service]       Show Compose status
+  resources [options]    Read-only host/container/GPU/disk resource snapshot
   health                 Check host endpoints and external dependencies
   logs [service]         Show the latest service logs
   build                  Build application images using existing lockfiles
 
 Service groups: ideas-hub, media-indexer, qwen, video-composer, orchestrator
+
+Resource options: --json, --watch [seconds]
 EOF
 }
 
@@ -465,6 +468,12 @@ status_stack() {
   status_group orchestrator
 }
 
+resources_stack() {
+  require_command python3
+  python3 "$INFRA_REPO_DIR/scripts/neovids_resources.py" \
+    --workspace-root "$ROOT_DIR" "$@"
+}
+
 check_url() {
   local label="$1" url="$2" required="${3:-true}"
   local result
@@ -632,6 +641,7 @@ main() {
       if [[ -n "${2:-}" ]]; then restart_group "$2"; else down_stack; up_stack; fi
       ;;
     status) status_stack "${2:-}" ;;
+    resources) resources_stack "${@:2}" ;;
     health) health_stack ;;
     logs) logs_stack "${2:-}" ;;
     build) build_all ;;

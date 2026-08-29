@@ -54,6 +54,8 @@ fi
 
 grep -Eq 'compose .*down.*--remove-orphans' "$TEST_DIR/../scripts/neovids" || \
   fail "safe project-scoped down command missing"
+grep -q 'resources)' "$TEST_DIR/../scripts/neovids" || \
+  fail "read-only resources command missing"
 if grep -Eq 'docker (system|volume|image|builder|network) prune|docker volume rm|down .*--volumes|down .*(-v)( |$)' \
   "$TEST_DIR/../scripts/neovids"; then
   fail "destructive Docker command found"

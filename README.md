@@ -16,6 +16,7 @@ normal workflow:
 
 ```bash
 ./scripts/neovids doctor
+./scripts/neovids resources
 ./scripts/neovids up
 ./scripts/neovids health
 ./scripts/neovids down
