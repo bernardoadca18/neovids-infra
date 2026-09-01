@@ -54,7 +54,8 @@ for an already integrated container and performs the same post-restart validatio
 dependency order. It never passes `-v`, never prunes, leaves the external
 network in place. 9Router and Headroom remain running after `down`; their bind
 mounted state is never removed. Provider health, including optional local
-Ollama, is owned by 9Router rather than treated as a NeoVids dependency.
+chat providers, is owned by 9Router. Host Ollama remains running independently
+because it is a required direct embedding dependency.
 Removing the application containers is deliberate: starting Docker or opening
 WSL after `down` cannot resurrect Qwen, Whisper workers, rendering, or workflow
 workers through a restart policy.
@@ -62,11 +63,11 @@ workers through a restart policy.
 ## Ownership and dependency graph
 
 ```text
-Headroom <──> 9Router <── combos/aliases <── provider accounts
+Headroom <──> 9Router <── chat/vision combos <── provider accounts
                  ^
                  |
-Ideas Hub -------+
-Media Indexer ---+
+Ideas Hub -------+                       Ideas Hub ------+
+Media Indexer ---+                       Media Indexer --+--> host Ollama embeddings
 
 Ideas Hub ────────────────> Media Indexer
                                   ^
@@ -112,11 +113,14 @@ eventual readiness.
 | Qwen Voice | 8889 | `/health/ready` |
 | Video Composer | 8013 | `/health/ready` |
 | 9Router | 20128 (loopback only) | `/api/health` plus authenticated `/v1/models` |
+| Ollama | 11434 | `/api/version` plus `/api/tags` model discovery |
 
 Liveness endpoints do not invoke models, embeddings, FFmpeg, Chromium, or jobs.
 Orchestrator readiness checks its durable stores and the four required service
 APIs. The CLI verifies 9Router readiness, authenticated model discovery,
-required chat combos and the embedding alias without issuing a model call.
+required chat/vision combos, Ollama readiness and the configured local embedding
+model without issuing a model call. The explicit embedding smoke performs the
+real 1024-dimensional validation.
 
 ## Durable storage contract
 
@@ -228,9 +232,11 @@ entire snapshot or pretending the value is zero.
    provider configuration; do not add provider fallback to NeoVids services.
 
 The installed 9Router contract uses `/api/health`; `/health` is not assumed.
-`/v1/models` requires the configured API key. Embedding capability is discovered
-through `/v1/models/embedding`, while the semantic embedding alias is stored in
-9Router because version 0.5.59 does not route normal combos on that endpoint.
+`/v1/models` requires the configured API key. Chat and multimodal alignment use
+9Router; Ideas Hub and Media Indexer embeddings call host Ollama `/api/embed`
+directly with the exact configured model tag and validate 1024 dimensions.
+Containers reach the host through `host.docker.internal:host-gateway`; no bridge
+IP is hardcoded.
 
 The service repositories remain independently operable with their original
 Compose commands. Repository-local Compose no longer uses automatic restart;

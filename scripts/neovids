@@ -8,6 +8,8 @@ NETWORK_NAME="${NEOVIDS_NETWORK:-neovids}"
 BACKUP_ROOT="${NEOVIDS_BACKUP_ROOT:-$HOME/backups/neovids}"
 NINEROUTER_COMPOSE_DIR="${NINEROUTER_COMPOSE_DIR:-$HOME/services/9router}"
 NINEROUTER_HOST_BASE_URL="${NINEROUTER_HOST_BASE_URL:-http://127.0.0.1:20128}"
+OLLAMA_HOST_BASE_URL="${OLLAMA_HOST_BASE_URL:-http://127.0.0.1:11434}"
+OLLAMA_EMBEDDING_MODEL="${OLLAMA_EMBEDDING_MODEL:-mxbai-embed-large:latest}"
 
 usage() {
   cat <<'EOF'
@@ -548,21 +550,7 @@ check_ninerouter_contract() {
     printf '%-24s UNAVAILABLE missing NINEROUTER_API_KEY\n' "9Router models"
     return 1
   fi
-  local embedding_alias embedding_target
-  embedding_alias="${NINEROUTER_EMBEDDING_MODEL:-neovids-embedding}"
-  embedding_target="$(docker exec 9router node -e '
-    const Database = require("better-sqlite3");
-    const db = new Database("/app/data/db/data.sqlite", { readonly: true });
-    const row = db.prepare("select value from kv where scope = ? and key = ?").get("modelAliases", process.argv[1]);
-    if (!row) process.exit(2);
-    console.log(JSON.parse(row.value));
-  ' "$embedding_alias" 2>/dev/null || true)"
-  if [[ -z "$embedding_target" ]]; then
-    printf '%-24s UNAVAILABLE alias=%s\n' "9Router embedding" "$embedding_alias"
-    return 1
-  fi
   export NINEROUTER_CHECK_BASE="$NINEROUTER_HOST_BASE_URL"
-  export NINEROUTER_EMBEDDING_TARGET="$embedding_target"
   export NINEROUTER_REQUIRED_CHAT_ROUTES="${NINEROUTER_REQUIRED_CHAT_ROUTES:-neovids-fast,neovids-standard,neovids-strong,neovids-vision}"
   python3 - <<'PY'
 import json
@@ -582,7 +570,6 @@ def model_ids(endpoint: str) -> set[str]:
 
 try:
     chat_routes = model_ids("/v1/models")
-    embedding_routes = model_ids("/v1/models/embedding")
 except (urllib.error.URLError, ValueError, KeyError) as exc:
     print(f"{'9Router models':24} UNAVAILABLE {type(exc).__name__}")
     raise SystemExit(1)
@@ -592,12 +579,36 @@ missing = sorted(required - chat_routes)
 if missing:
     print(f"{'9Router models':24} UNAVAILABLE missing={','.join(missing)}")
     raise SystemExit(1)
-target = os.environ["NINEROUTER_EMBEDDING_TARGET"]
-if target not in embedding_routes:
-    print(f"{'9Router embedding':24} UNAVAILABLE target_not_embedding_capable={target}")
-    raise SystemExit(1)
 print(f"{'9Router models':24} READY       routes={','.join(sorted(required))}")
-print(f"{'9Router embedding':24} READY       alias={os.environ.get('NINEROUTER_EMBEDDING_MODEL', 'neovids-embedding')} dimensions_checked_by_consumers=1024")
+PY
+}
+
+check_ollama_contract() {
+  require_command python3
+  export OLLAMA_CHECK_BASE="$OLLAMA_HOST_BASE_URL"
+  export OLLAMA_CHECK_MODEL="$OLLAMA_EMBEDDING_MODEL"
+  python3 - <<'PY'
+import json
+import os
+import urllib.error
+import urllib.request
+
+base = os.environ["OLLAMA_CHECK_BASE"].rstrip("/")
+model = os.environ["OLLAMA_CHECK_MODEL"]
+try:
+    with urllib.request.urlopen(base + "/api/version", timeout=5) as response:
+        version = str(json.load(response).get("version") or "unknown")
+    with urllib.request.urlopen(base + "/api/tags", timeout=5) as response:
+        payload = json.load(response)
+except (urllib.error.URLError, ValueError, KeyError) as exc:
+    print(f"{'Ollama embeddings':24} UNAVAILABLE {type(exc).__name__}")
+    raise SystemExit(1)
+
+models = {str(item.get("name")) for item in payload.get("models", [])}
+if model not in models:
+    print(f"{'Ollama embeddings':24} UNAVAILABLE missing_model={model}")
+    raise SystemExit(1)
+print(f"{'Ollama embeddings':24} READY       version={version} model={model} expected_dimensions=1024")
 PY
 }
 
@@ -607,6 +618,8 @@ start_model_gateway() {
   wait_container_health "9Router" "$(router_compose ps --quiet 9router)" 90
   wait_http "9Router API" "$NINEROUTER_HOST_BASE_URL/api/health" 60
   check_ninerouter_contract
+  wait_http "Ollama API" "$OLLAMA_HOST_BASE_URL/api/version" 15
+  check_ollama_contract
 }
 
 report_port() {
@@ -623,6 +636,7 @@ health_stack() {
   local failed=0
   check_url "9Router" "$NINEROUTER_HOST_BASE_URL/api/health" || failed=1
   check_ninerouter_contract || failed=1
+  check_ollama_contract || failed=1
   wait_container_health "Headroom" "$(router_compose ps --quiet headroom)" 5 || failed=1
   check_url "Ideas Hub" "http://127.0.0.1:8000/health/ready" || failed=1
   check_url "Media Indexer" "http://127.0.0.1:8012/health/ready" || failed=1
@@ -678,9 +692,11 @@ doctor() {
   printf '\nModel gateway boundary:\n'
   check_url "9Router" "$NINEROUTER_HOST_BASE_URL/api/health" || failed=1
   check_ninerouter_contract || failed=1
+  check_ollama_contract || failed=1
   wait_container_health "Headroom" "$(router_compose ps --quiet headroom)" 5 || failed=1
   printf '\nHost ports:\n'
   report_port 20128 "9Router"
+  report_port 11434 "Ollama embeddings"
   report_port 8000 "Ideas Hub API"
   report_port 5173 "Ideas Hub frontend"
   report_port 5432 "Ideas Hub PostgreSQL"

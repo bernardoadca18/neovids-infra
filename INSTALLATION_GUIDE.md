@@ -21,7 +21,9 @@ Recomendado:
 - pelo menos 100 GB livres para imagens/cache, além do espaço dos vídeos;
 - acesso à internet durante a instalação e o primeiro download dos modelos;
 - uma API key válida do 9Router e combos/aliases semânticos configurados para
-  chat, embeddings e visão.
+  chat e visão;
+- Ollama disponível no host com um modelo de embeddings 1024d, atualmente
+  `mxbai-embed-large:latest`.
 
 Layout final:
 
@@ -166,9 +168,14 @@ Valores operacionais importantes:
 | Qwen Voice | 8889 | GPU, jobs SQLite e outputs persistentes |
 | Video Composer | 8013 | SQLite/outputs no volume nomeado |
 | 9Router/Headroom | 20128/sem porta host | compose em `~/services/9router` |
+| Ollama | 11434 | embeddings diretos para Ideas Hub e Media Indexer |
 
 No Ideas Hub e Media Indexer, configure `NINEROUTER_BASE_URL=http://9router:20128`,
-uma `NINEROUTER_API_KEY` válida e aliases semânticos. No Qwen, preserve o
+uma `NINEROUTER_API_KEY` válida e aliases semânticos de chat/visão. Configure
+também `OLLAMA_BASE_URL=http://host.docker.internal:11434`,
+`EMBEDDING_MODEL=mxbai-embed-large:latest` e dimensão 1024. Os composes usam o
+mapping Linux `host.docker.internal:host-gateway`; não configure IP de bridge.
+No Qwen, preserve o
 `MODEL_REVISION` pinado, o
 `DEFAULT_VOICE_PROFILE` e as referências em `data/references`. Não coloque
 chaves em Git, logs ou imagens.
@@ -223,12 +230,14 @@ curl --fail http://127.0.0.1:8011/health/ready
 curl --fail http://127.0.0.1:8889/health/ready
 curl --fail http://127.0.0.1:8013/health/ready
 curl --fail http://127.0.0.1:20128/api/health
+curl --fail http://127.0.0.1:11434/api/version
 ```
 
 Abra `http://localhost:5173` e `http://localhost:5174` para os frontends. O
-`doctor`/`health` valida o boundary do 9Router, os combos necessários e o alias
-de embedding. Providers individuais, incluindo Ollama local, não são
-dependências diretas do NeoVids.
+`doctor`/`health` valida o boundary do 9Router, os combos necessários e o
+boundary direto de Ollama, incluindo a presença do modelo configurado. O health
+é barato e não gera vetor; o smoke explícito de embedding deve confirmar 1024
+dimensões antes de usar pgvector.
 
 Para um teste funcional controlado, use os scripts de smoke documentados nos
 repositórios (ASR/visual/temporal/candidate/alignment e o smoke Stage 17 do
