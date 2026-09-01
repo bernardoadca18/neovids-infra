@@ -3,7 +3,7 @@
 Este documento descreve uma instalação limpa em **Ubuntu 24.04 LTS** para o
 ambiente local do NeoVids. O escopo é desenvolvimento/produção local em uma
 única máquina: Docker Compose, cinco serviços, PostgreSQL/Redis internos,
-Qwen3-TTS em uma GPU NVIDIA e LiteLLM externo.
+Qwen3-TTS em uma GPU NVIDIA e 9Router/Headroom como gateway de modelos.
 
 O diretório recomendado é `/home/$USER/workspaces/neovids`. Não coloque o
 workspace em `/mnt/c`, em um disco de gameplay ou em uma pasta sincronizada:
@@ -20,8 +20,8 @@ Recomendado:
   validada possui RTX 2060 12 GB);
 - pelo menos 100 GB livres para imagens/cache, além do espaço dos vídeos;
 - acesso à internet durante a instalação e o primeiro download dos modelos;
-- credenciais válidas do LiteLLM para embeddings e alinhamento quando essas
-  funções forem usadas.
+- uma API key válida do 9Router e combos/aliases semânticos configurados para
+  chat, embeddings e visão.
 
 Layout final:
 
@@ -165,10 +165,11 @@ Valores operacionais importantes:
 | Orchestrator API/frontend | 8011/5174 | PostgreSQL 5434; Redis 6380 |
 | Qwen Voice | 8889 | GPU, jobs SQLite e outputs persistentes |
 | Video Composer | 8013 | SQLite/outputs no volume nomeado |
-| LiteLLM externo | 4000 | não é gerenciado pelo NeoVids |
+| 9Router/Headroom | 20128/sem porta host | compose em `~/services/9router` |
 
-No Media Indexer, configure `LITELLM_BASE_URL` alcançável pelo container e uma
-`LITELLM_API_KEY` válida. No Qwen, preserve o `MODEL_REVISION` pinado, o
+No Ideas Hub e Media Indexer, configure `NINEROUTER_BASE_URL=http://9router:20128`,
+uma `NINEROUTER_API_KEY` válida e aliases semânticos. No Qwen, preserve o
+`MODEL_REVISION` pinado, o
 `DEFAULT_VOICE_PROFILE` e as referências em `data/references`. Não coloque
 chaves em Git, logs ou imagens.
 
@@ -221,12 +222,13 @@ curl --fail http://127.0.0.1:8012/health/ready
 curl --fail http://127.0.0.1:8011/health/ready
 curl --fail http://127.0.0.1:8889/health/ready
 curl --fail http://127.0.0.1:8013/health/ready
-curl --fail http://127.0.0.1:4000/health/readiness   # externo, se configurado
+curl --fail http://127.0.0.1:20128/api/health
 ```
 
 Abra `http://localhost:5173` e `http://localhost:5174` para os frontends. O
-`doctor`/`health` pode informar Ollama indisponível; isso é opcional. LiteLLM
-é obrigatório apenas para os fluxos que geram embeddings/alinhamento.
+`doctor`/`health` valida o boundary do 9Router, os combos necessários e o alias
+de embedding. Providers individuais, incluindo Ollama local, não são
+dependências diretas do NeoVids.
 
 Para um teste funcional controlado, use os scripts de smoke documentados nos
 repositórios (ASR/visual/temporal/candidate/alignment e o smoke Stage 17 do
@@ -290,7 +292,7 @@ cd ~/workspaces/neovids/video-composer && npm ci && npm test
 ```
 
 Os testes normais usam providers fakes e não baixam Qwen/Whisper. Smokes de GPU,
-LiteLLM, pgvector e mídia real são opt-in e devem ser reportados separadamente.
+9Router, pgvector e mídia real são opt-in e devem ser reportados separadamente.
 
 ## 12. Troubleshooting
 
@@ -306,9 +308,9 @@ ou edite linhas de banco manualmente.
 referência WAV/TXT e o cache Hugging Face. O modelo é carregado no lifespan;
 importar o código não o baixa.
 
-**LiteLLM retorna 401/timeout.** Corrija a credencial/endpoint no ambiente
-externo. Não remova autenticação nem substitua o provider; os testes locais
-devem usar fakes.
+**9Router retorna 401/timeout.** Corrija a API key, o endpoint ou a configuração
+do combo no gateway. Não remova autenticação nem introduza fallback de provider
+nos consumidores; os testes locais devem usar fakes.
 
 **Pouca RAM/swap.** Pare jobs, mantenha apenas um worker GPU e aumente memória
 física/swap do Ubuntu. Não altere precisão/modelo como primeira medida.
@@ -356,4 +358,3 @@ infraestrutura.
 - [ ] smoke funcional executado com fakes ou mídia curta controlada
 - [ ] backups fora do Git e volumes preservados
 - [ ] `down` deixa zero containers NeoVids ativos
-

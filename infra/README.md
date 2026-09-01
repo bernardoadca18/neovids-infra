@@ -6,10 +6,10 @@ symlinks retained only for operator convenience. The CLI resolves the workspace
 from the repository location, so the repository can be moved together with its
 five sibling service repositories without embedding an absolute host path.
 
-This directory coordinates the five independent NeoVids Compose projects. It
-does not replace their service-owned Compose files, move business logic, or own
-LiteLLM/Ollama. The operational layer adds a shared API backplane and one safe
-development lifecycle.
+This directory coordinates the five independent NeoVids Compose projects plus
+the shared 9Router/Headroom gateway deployment. It does not replace
+service-owned Compose files or move business logic. The operational layer adds
+a shared API backplane and one safe development lifecycle.
 
 ## Normal workflow
 
@@ -28,7 +28,8 @@ From `/home/bernardo/workspaces/neovids`:
 
 `up` works from a cold image/cache state. It validates installation mode and
 bind-mount identities, creates the external `neovids` network when absent,
-starts only the three application databases and Orchestrator Redis, verifies
+starts Headroom and 9Router first, then the three application databases and
+Orchestrator Redis, verifies
 representative existing table contents, builds missing images, inspects Alembic
 state, and starts APIs in dependency order. When at least one database has a
 pending migration, it writes logical PostgreSQL backups outside Git/volumes
@@ -51,7 +52,9 @@ for an already integrated container and performs the same post-restart validatio
 
 `down` executes project-scoped `docker compose down --remove-orphans` in reverse
 dependency order. It never passes `-v`, never prunes, leaves the external
-network in place, and never manages LiteLLM, Ollama, or unrelated containers.
+network in place. 9Router and Headroom remain running after `down`; their bind
+mounted state is never removed. Provider health, including optional local
+Ollama, is owned by 9Router rather than treated as a NeoVids dependency.
 Removing the application containers is deliberate: starting Docker or opening
 WSL after `down` cannot resurrect Qwen, Whisper workers, rendering, or workflow
 workers through a restart policy.
@@ -59,7 +62,11 @@ workers through a restart policy.
 ## Ownership and dependency graph
 
 ```text
-LiteLLM / Ollama (external, detected only)
+Headroom <──> 9Router <── combos/aliases <── provider accounts
+                 ^
+                 |
+Ideas Hub -------+
+Media Indexer ---+
 
 Ideas Hub ────────────────> Media Indexer
                                   ^
@@ -78,6 +85,7 @@ repositories. Stable aliases are:
 
 | Alias | Container port | Owner |
 | --- | ---: | --- |
+| `9router` | 20128 | 9Router gateway |
 | `ideas-hub` | 8000 | Ideas Hub backend |
 | `media-indexer` | 8000 | Media Indexer API/worker |
 | `qwen-voice` | 8889 | Qwen Voice Service |
@@ -103,12 +111,12 @@ eventual readiness.
 | Media Indexer PostgreSQL | 5435 | `pg_isready` |
 | Qwen Voice | 8889 | `/health/ready` |
 | Video Composer | 8013 | `/health/ready` |
-| LiteLLM (external) | 4000 | `/health/readiness` |
-| Ollama (external, optional) | 11434 | `/api/tags` |
+| 9Router | 20128 (loopback only) | `/api/health` plus authenticated `/v1/models` |
 
 Liveness endpoints do not invoke models, embeddings, FFmpeg, Chromium, or jobs.
 Orchestrator readiness checks its durable stores and the four required service
-APIs. LiteLLM is checked separately because NeoVids does not own its lifecycle.
+APIs. The CLI verifies 9Router readiness, authenticated model discovery,
+required chat combos and the embedding alias without issuing a model call.
 
 ## Durable storage contract
 
@@ -216,13 +224,13 @@ entire snapshot or pretending the value is zero.
    application migrations.
 4. If readiness fails, inspect `./scripts/neovids status` and
    `./scripts/neovids logs <service>`.
-5. LiteLLM/Ollama failures are reported but never repaired or replaced by this
-   tooling. Fix them in their owning deployment.
+5. 9Router failures are reported at the gateway boundary. Inspect its combo and
+   provider configuration; do not add provider fallback to NeoVids services.
 
-An external container may be marked unhealthy because its own image lacks the
-binary used by its Docker healthcheck even while its HTTP readiness endpoint is
-healthy. The NeoVids CLI uses the HTTP contract as the external dependency
-signal and reports the Docker discrepancy separately during diagnosis.
+The installed 9Router contract uses `/api/health`; `/health` is not assumed.
+`/v1/models` requires the configured API key. Embedding capability is discovered
+through `/v1/models/embedding`, while the semantic embedding alias is stored in
+9Router because version 0.5.59 does not route normal combos on that endpoint.
 
 The service repositories remain independently operable with their original
 Compose commands. Repository-local Compose no longer uses automatic restart;

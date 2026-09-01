@@ -6,6 +6,8 @@ INFRA_REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 ROOT_DIR="${NEOVIDS_WORKSPACE_ROOT:-$(cd "$INFRA_REPO_DIR/.." && pwd -P)}"
 NETWORK_NAME="${NEOVIDS_NETWORK:-neovids}"
 BACKUP_ROOT="${NEOVIDS_BACKUP_ROOT:-$HOME/backups/neovids}"
+NINEROUTER_COMPOSE_DIR="${NINEROUTER_COMPOSE_DIR:-$HOME/services/9router}"
+NINEROUTER_HOST_BASE_URL="${NINEROUTER_HOST_BASE_URL:-http://127.0.0.1:20128}"
 
 usage() {
   cat <<'EOF'
@@ -22,10 +24,35 @@ Commands:
   logs [service]         Show the latest service logs
   build                  Build application images using existing lockfiles
 
-Service groups: ideas-hub, media-indexer, qwen, video-composer, orchestrator
+Service groups: 9router, ideas-hub, media-indexer, qwen, video-composer, orchestrator
 
 Resource options: --json, --watch [seconds]
 EOF
+}
+
+router_compose() {
+  [[ -f "$NINEROUTER_COMPOSE_DIR/compose.yml" ]] || {
+    printf '9Router compose file is unavailable: %s/compose.yml\n' "$NINEROUTER_COMPOSE_DIR" >&2
+    return 1
+  }
+  (
+    cd "$NINEROUTER_COMPOSE_DIR"
+    docker compose "$@"
+  )
+}
+
+load_ninerouter_api_key() {
+  [[ -n "${NINEROUTER_API_KEY:-}" ]] && return
+  local env_file line
+  for env_file in "$ROOT_DIR/ideas-hub/.env" "$ROOT_DIR/media-indexer/.env"; do
+    [[ -r "$env_file" ]] || continue
+    line="$(grep -m1 '^NINEROUTER_API_KEY=' "$env_file" || true)"
+    if [[ -n "${line#NINEROUTER_API_KEY=}" ]]; then
+      NINEROUTER_API_KEY="${line#NINEROUTER_API_KEY=}"
+      export NINEROUTER_API_KEY
+      return
+    fi
+  done
 }
 
 compose() {
@@ -404,6 +431,7 @@ up_stack() {
   require_command curl
   prepare_installation
   ensure_network
+  start_model_gateway
 
   compose ideas-hub up --detach db
   compose media-indexer up --detach db
@@ -467,11 +495,16 @@ down_stack() {
   compose qwen down --remove-orphans
   compose media-indexer down --remove-orphans
   compose ideas-hub down --remove-orphans
-  printf 'NeoVids containers stopped and removed. Persistent volumes were preserved.\n'
+  printf 'NeoVids application containers stopped and removed. Persistent volumes were preserved.\n'
+  printf '9Router and Headroom remain running as the shared model gateway boundary.\n'
 }
 
 status_group() {
   printf '\n[%s]\n' "$1"
+  if [[ "$1" == "9router" ]]; then
+    router_compose ps
+    return
+  fi
   compose "$1" ps
 }
 
@@ -481,6 +514,7 @@ status_stack() {
     status_group "$selected"
     return
   fi
+  status_group 9router
   status_group ideas-hub
   status_group media-indexer
   status_group qwen
@@ -507,6 +541,74 @@ check_url() {
   [[ "$required" != "true" ]]
 }
 
+check_ninerouter_contract() {
+  require_command python3
+  load_ninerouter_api_key
+  if [[ -z "${NINEROUTER_API_KEY:-}" ]]; then
+    printf '%-24s UNAVAILABLE missing NINEROUTER_API_KEY\n' "9Router models"
+    return 1
+  fi
+  local embedding_alias embedding_target
+  embedding_alias="${NINEROUTER_EMBEDDING_MODEL:-neovids-embedding}"
+  embedding_target="$(docker exec 9router node -e '
+    const Database = require("better-sqlite3");
+    const db = new Database("/app/data/db/data.sqlite", { readonly: true });
+    const row = db.prepare("select value from kv where scope = ? and key = ?").get("modelAliases", process.argv[1]);
+    if (!row) process.exit(2);
+    console.log(JSON.parse(row.value));
+  ' "$embedding_alias" 2>/dev/null || true)"
+  if [[ -z "$embedding_target" ]]; then
+    printf '%-24s UNAVAILABLE alias=%s\n' "9Router embedding" "$embedding_alias"
+    return 1
+  fi
+  export NINEROUTER_CHECK_BASE="$NINEROUTER_HOST_BASE_URL"
+  export NINEROUTER_EMBEDDING_TARGET="$embedding_target"
+  export NINEROUTER_REQUIRED_CHAT_ROUTES="${NINEROUTER_REQUIRED_CHAT_ROUTES:-neovids-fast,neovids-standard,neovids-strong,neovids-vision}"
+  python3 - <<'PY'
+import json
+import os
+import urllib.error
+import urllib.request
+
+base = os.environ["NINEROUTER_CHECK_BASE"].rstrip("/")
+key = os.environ["NINEROUTER_API_KEY"]
+headers = {"Authorization": f"Bearer {key}"}
+
+def model_ids(endpoint: str) -> set[str]:
+    request = urllib.request.Request(base + endpoint, headers=headers)
+    with urllib.request.urlopen(request, timeout=8) as response:
+        payload = json.load(response)
+    return {str(item["id"]) for item in payload.get("data", []) if item.get("id")}
+
+try:
+    chat_routes = model_ids("/v1/models")
+    embedding_routes = model_ids("/v1/models/embedding")
+except (urllib.error.URLError, ValueError, KeyError) as exc:
+    print(f"{'9Router models':24} UNAVAILABLE {type(exc).__name__}")
+    raise SystemExit(1)
+
+required = set(filter(None, os.environ["NINEROUTER_REQUIRED_CHAT_ROUTES"].split(",")))
+missing = sorted(required - chat_routes)
+if missing:
+    print(f"{'9Router models':24} UNAVAILABLE missing={','.join(missing)}")
+    raise SystemExit(1)
+target = os.environ["NINEROUTER_EMBEDDING_TARGET"]
+if target not in embedding_routes:
+    print(f"{'9Router embedding':24} UNAVAILABLE target_not_embedding_capable={target}")
+    raise SystemExit(1)
+print(f"{'9Router models':24} READY       routes={','.join(sorted(required))}")
+print(f"{'9Router embedding':24} READY       alias={os.environ.get('NINEROUTER_EMBEDDING_MODEL', 'neovids-embedding')} dimensions_checked_by_consumers=1024")
+PY
+}
+
+start_model_gateway() {
+  router_compose up --detach headroom 9router
+  wait_container_health "Headroom" "$(router_compose ps --quiet headroom)" 90
+  wait_container_health "9Router" "$(router_compose ps --quiet 9router)" 90
+  wait_http "9Router API" "$NINEROUTER_HOST_BASE_URL/api/health" 60
+  check_ninerouter_contract
+}
+
 report_port() {
   local port="$1" label="$2"
   if ss --tcp --listening --numeric "sport = :$port" | tail -n +2 | grep -q .; then
@@ -519,8 +621,9 @@ report_port() {
 health_stack() {
   require_command curl
   local failed=0
-  check_url "LiteLLM (external)" "http://127.0.0.1:4000/health/readiness" || failed=1
-  check_url "Ollama (external)" "http://127.0.0.1:11434/api/tags" false || true
+  check_url "9Router" "$NINEROUTER_HOST_BASE_URL/api/health" || failed=1
+  check_ninerouter_contract || failed=1
+  wait_container_health "Headroom" "$(router_compose ps --quiet headroom)" 5 || failed=1
   check_url "Ideas Hub" "http://127.0.0.1:8000/health/ready" || failed=1
   check_url "Media Indexer" "http://127.0.0.1:8012/health/ready" || failed=1
   check_url "Qwen Voice" "http://127.0.0.1:8889/health/ready" || failed=1
@@ -572,10 +675,12 @@ doctor() {
     printf 'nvidia-smi unavailable\n'
     failed=1
   fi
-  printf '\nExternal dependencies:\n'
-  check_url "LiteLLM" "http://127.0.0.1:4000/health/readiness" || failed=1
-  check_url "Ollama" "http://127.0.0.1:11434/api/tags" false || true
+  printf '\nModel gateway boundary:\n'
+  check_url "9Router" "$NINEROUTER_HOST_BASE_URL/api/health" || failed=1
+  check_ninerouter_contract || failed=1
+  wait_container_health "Headroom" "$(router_compose ps --quiet headroom)" 5 || failed=1
   printf '\nHost ports:\n'
+  report_port 20128 "9Router"
   report_port 8000 "Ideas Hub API"
   report_port 5173 "Ideas Hub frontend"
   report_port 5432 "Ideas Hub PostgreSQL"
@@ -602,6 +707,10 @@ doctor() {
 }
 
 logs_group() {
+  if [[ "$1" == "9router" ]]; then
+    router_compose logs --tail 200
+    return
+  fi
   compose "$1" logs --tail 200
 }
 
@@ -611,6 +720,7 @@ logs_stack() {
     logs_group "$selected"
     return
   fi
+  logs_group 9router
   logs_group ideas-hub
   logs_group media-indexer
   logs_group qwen
@@ -620,6 +730,13 @@ logs_stack() {
 
 restart_group() {
   case "$1" in
+    9router)
+      router_compose restart headroom 9router
+      wait_container_health "Headroom" "$(router_compose ps --quiet headroom)" 90
+      wait_container_health "9Router" "$(router_compose ps --quiet 9router)" 90
+      wait_http "9Router API" "$NINEROUTER_HOST_BASE_URL/api/health" 60
+      check_ninerouter_contract
+      ;;
     ideas-hub)
       compose ideas-hub restart backend frontend
       wait_http "Ideas Hub API" "http://127.0.0.1:8000/health/ready" 120
