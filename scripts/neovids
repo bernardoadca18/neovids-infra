@@ -465,7 +465,7 @@ up_stack() {
   fi
   run_pending_migrations
 
-  compose ideas-hub up --detach --no-build backend frontend
+  compose ideas-hub up --detach --no-build backend frontend generation-worker
   wait_http "Ideas Hub API" "http://127.0.0.1:8000/health/ready" 120
   wait_http "Ideas Hub frontend" "http://127.0.0.1:5173" 120
 
