@@ -2,10 +2,18 @@ services:
   api:
     image: neovids-media-indexer:local
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    volumes:
+      # Optional HDD storage - set MEDIA_INDEXER_HDD_HOST_PATH env var to enable
+      # When not set, a dummy named volume is used (HDD disabled)
+      - "${MEDIA_INDEXER_HDD_HOST_PATH:-media-indexer-hdd-disabled}:/data/media-hdd:rw"
     networks:
       default: {}
       neovids:
         aliases: [media-indexer]
+
+volumes:
+  media-indexer-hdd-disabled:
+    # Dummy volume used when HDD is not configured
 
 networks:
   neovids:
