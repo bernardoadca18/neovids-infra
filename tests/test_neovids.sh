@@ -52,6 +52,27 @@ else
   [[ "$?" == "2" ]] || fail "invalid up option did not return exit code 2"
 fi
 
+preflight_root="$(mktemp -d)"
+trap 'rm -rf "$preflight_root"' EXIT
+compose() {
+  [[ "$1" == "media-indexer" && "$2" == "config" && "$3" == "--environment" ]] || \
+    fail "unexpected fake compose call"
+  printf 'MEDIA_INDEXER_HDD_HOST_PATH=%s\n' "$FAKE_HDD_PATH"
+}
+unset MEDIA_INDEXER_HDD_HOST_PATH
+FAKE_HDD_PATH="$preflight_root/missing"
+if validate_media_indexer_hdd_host_path >/dev/null 2>&1; then
+  fail "missing HDD host path passed preflight"
+fi
+touch "$preflight_root/file"
+FAKE_HDD_PATH="$preflight_root/file"
+if validate_media_indexer_hdd_host_path >/dev/null 2>&1; then
+  fail "non-directory HDD host path passed preflight"
+fi
+mkdir "$preflight_root/hdd"
+FAKE_HDD_PATH="$preflight_root/hdd"
+validate_media_indexer_hdd_host_path || fail "existing HDD directory failed preflight"
+
 grep -Eq 'compose .*down.*--remove-orphans' "$TEST_DIR/../scripts/neovids" || \
   fail "safe project-scoped down command missing"
 grep -q 'resources)' "$TEST_DIR/../scripts/neovids" || \

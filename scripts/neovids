@@ -107,6 +107,34 @@ compose() {
   )
 }
 
+compose_environment_value() {
+  local group="$1" variable="$2" line
+  while IFS= read -r line; do
+    if [[ "$line" == "$variable="* ]]; then
+      printf '%s' "${line#*=}"
+      return
+    fi
+  done < <(compose "$group" config --environment)
+}
+
+validate_media_indexer_hdd_host_path() {
+  local path
+  if [[ -v MEDIA_INDEXER_HDD_HOST_PATH ]]; then
+    path="$MEDIA_INDEXER_HDD_HOST_PATH"
+  else
+    path="$(compose_environment_value media-indexer MEDIA_INDEXER_HDD_HOST_PATH)"
+  fi
+  [[ -z "$path" ]] && return
+  if [[ ! -e "$path" ]]; then
+    printf 'MEDIA_INDEXER_HDD_HOST_PATH does not exist: %s\n' "$path" >&2
+    return 1
+  fi
+  if [[ ! -d "$path" ]]; then
+    printf 'MEDIA_INDEXER_HDD_HOST_PATH is not a directory: %s\n' "$path" >&2
+    return 1
+  fi
+}
+
 require_command() {
   command -v "$1" >/dev/null 2>&1 || {
     printf 'Required command is unavailable: %s\n' "$1" >&2
@@ -431,6 +459,7 @@ up_stack() {
   fi
   require_docker
   require_command curl
+  validate_media_indexer_hdd_host_path
   prepare_installation
   ensure_network
   start_model_gateway
