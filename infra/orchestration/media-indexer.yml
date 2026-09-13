@@ -7,12 +7,16 @@ services:
       # Both STORAGE_ROOT_HDD and MEDIA_INDEXER_HDD_MOUNT_PATH are derived from it
       STORAGE_ROOT_HDD: ${MEDIA_INDEXER_HDD_HOST_PATH:+/data/media-hdd}
       MEDIA_INDEXER_HDD_MOUNT_PATH: ${MEDIA_INDEXER_HDD_HOST_PATH:+/data/media-hdd}
+      # Temp directory for large file operations (HDD-backed)
+      TEMP_ROOT: /data/tmp
     volumes:
       # Primary storage
       - "${MEDIA_INDEXER_STORAGE_HOST_PATH:-./storage}:/data/storage"
       # Optional HDD storage - set MEDIA_INDEXER_HDD_HOST_PATH env var to enable
       # When set, the host path is mounted; when not set, this line is ignored
       - "${MEDIA_INDEXER_HDD_HOST_PATH:-empty-hdd-placeholder}:/data/media-hdd:rw"
+      # Temp directory for large file operations (HDD-backed)
+      - "${MEDIA_INDEXER_TEMP_HOST_PATH:-${MEDIA_INDEXER_STORAGE_HOST_PATH:-./storage}/../tmp}:/data/tmp:rw"
     networks:
       default: {}
       neovids:
