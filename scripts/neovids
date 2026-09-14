@@ -25,10 +25,13 @@ Commands:
   health                 Check host endpoints and external dependencies
   logs [service]         Show the latest service logs
   build                  Build application images using existing lockfiles
+  preflight-production   Read-only production readiness gate for a script
 
 Service groups: 9router, ideas-hub, media-indexer, qwen, video-composer, orchestrator
 
 Resource options: --json, --watch [seconds]
+
+Preflight options: --roteiro-id <UUID> [--json]
 EOF
 }
 
@@ -773,6 +776,47 @@ logs_stack() {
   logs_group orchestrator
 }
 
+preflight_production() {
+  local roteiro_id="" json_output=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --roteiro-id)
+        [[ -n "${2:-}" ]] || { printf "Missing argument for --roteiro-id\n" >&2; return 2; }
+        roteiro_id="$2"
+        shift 2
+        ;;
+      --json)
+        json_output=true
+        shift
+        ;;
+      -h|--help)
+        python3 "$INFRA_REPO_DIR/scripts/production_preflight.py" --help
+        return 0
+        ;;
+      *)
+        printf "Unknown preflight option: %s\n" "$1" >&2
+        return 2
+        ;;
+    esac
+  done
+  if [[ -z "$roteiro_id" ]]; then
+    printf "preflight-production requires --roteiro-id <UUID>\n" >&2
+    return 2
+  fi
+  require_command python3
+  local args=(
+    --workspace-root "$ROOT_DIR"
+    --roteiro-id "$roteiro_id"
+    --ninerouter-base "$NINEROUTER_HOST_BASE_URL"
+    --ollama-base "$OLLAMA_HOST_BASE_URL"
+  )
+  if [[ "$json_output" == "true" ]]; then
+    args+=(--json)
+  fi
+  load_ninerouter_api_key
+  python3 "$INFRA_REPO_DIR/scripts/production_preflight.py" "${args[@]}"
+}
+
 restart_group() {
   case "$1" in
     9router)
@@ -829,6 +873,10 @@ main() {
     health) health_stack ;;
     logs) logs_stack "${2:-}" ;;
     build) build_all ;;
+    preflight-production)
+      shift
+      preflight_production "$@"
+      ;;
     -h|--help|help|"") usage ;;
     *) usage >&2; return 2 ;;
   esac
