@@ -11,6 +11,9 @@ services:
   frontend:
     image: neovids-ideas-hub-frontend:local
 
+  generation-worker:
+    image: neovids-ideas-hub-backend:local
+
 networks:
   neovids:
     name: ${NEOVIDS_NETWORK:-neovids}
