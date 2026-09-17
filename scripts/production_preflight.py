@@ -46,7 +46,7 @@ NINEROUTER_BASE = "http://127.0.0.1:20128"
 OLLAMA_BASE = "http://127.0.0.1:11434"
 
 DEFAULT_TIMEOUT = 8
-VOICE_PROFILE_BASELINE = "bernardo_xvec_v3"
+VOICE_PROFILE_BASELINE = "bernardo_xvec_v4"
 GENERATION_PROFILE_BASELINE = "narration_v2"
 OLLAMA_EMBEDDING_MODEL = "mxbai-embed-large:latest"
 
