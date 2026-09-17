@@ -13,6 +13,8 @@ services:
 
   generation-worker:
     image: neovids-ideas-hub-backend:local
+    environment:
+      ORCHESTRATOR_BASE_URL: http://orchestrator-api:8000
 
 networks:
   neovids:
