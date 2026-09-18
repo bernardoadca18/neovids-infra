@@ -27,7 +27,7 @@ Commands:
   build                  Build application images using existing lockfiles
   preflight-production   Read-only production readiness gate for a script
 
-Service groups: 9router, ideas-hub, media-indexer, qwen, video-composer, orchestrator
+Service groups: 9router, ideas-hub, media-indexer, qwen, video-composer, thumbnail-director, orchestrator
 
 Resource options: --json, --watch [seconds]
 
@@ -63,6 +63,7 @@ load_ninerouter_api_key() {
 compose() {
   local group="$1"
   shift
+  if [[ "$group" == "thumbnail-director" ]]; then load_ninerouter_api_key; fi
   local repo project base override
   case "$group" in
     ideas-hub)
@@ -88,6 +89,12 @@ compose() {
       project="qwen3-tts-workshop"
       base="docker-compose.yaml"
       override="qwen3-tts-workshop.yml"
+      ;;
+    thumbnail-director)
+      repo="thumbnail-director"
+      project="thumbnail-director"
+      base="docker-compose.yml"
+      override="thumbnail-director.yml"
       ;;
     video-composer)
       repo="video-composer"
@@ -425,6 +432,9 @@ build_missing_images() {
   if image_missing neovids-qwen-voice:local; then
     compose qwen build qwen-tts
   fi
+  if image_missing neovids-thumbnail-director:local; then
+    compose thumbnail-director build thumbnail-director
+  fi
   if image_missing neovids-video-composer:stage16; then
     compose video-composer build video-composer
   fi
@@ -441,6 +451,7 @@ build_all() {
   compose media-indexer build api
   compose qwen build qwen-tts
   compose video-composer build video-composer
+  compose thumbnail-director build thumbnail-director
   compose orchestrator build api frontend
 }
 
@@ -512,6 +523,9 @@ up_stack() {
   compose video-composer up --detach --no-build video-composer
   wait_http "Video Composer" "http://127.0.0.1:8013/health/ready" 300
 
+  compose thumbnail-director up --detach --no-build thumbnail-director
+  wait_http "Thumbnail Director" "http://127.0.0.1:8014/health/ready" 120
+
   compose orchestrator up --detach --no-build api worker frontend
   wait_http "Orchestrator API" "http://127.0.0.1:8011/health/live" 180
   wait_container_health "Orchestrator worker" "$(container_id orchestrator worker)" 180
@@ -525,6 +539,7 @@ up_stack() {
 down_stack() {
   require_docker
   compose orchestrator down --remove-orphans
+  compose thumbnail-director down --remove-orphans
   compose video-composer down --remove-orphans
   compose qwen down --remove-orphans
   compose media-indexer down --remove-orphans
@@ -553,6 +568,7 @@ status_stack() {
   status_group media-indexer
   status_group qwen
   status_group video-composer
+  status_group thumbnail-director
   status_group orchestrator
 }
 
@@ -675,6 +691,7 @@ health_stack() {
   check_url "Qwen Voice" "http://127.0.0.1:8889/health/ready" || failed=1
   validate_qwen_topology || failed=1
   check_url "Video Composer" "http://127.0.0.1:8013/health/ready" || failed=1
+  check_url "Thumbnail Director" "http://127.0.0.1:8014/health/ready" || failed=1
   check_url "Orchestrator" "http://127.0.0.1:8011/health/ready" || failed=1
   check_url "Ideas Hub frontend" "http://127.0.0.1:5173" || failed=1
   check_url "Orchestrator frontend" "http://127.0.0.1:5174" || failed=1
@@ -736,6 +753,7 @@ doctor() {
   report_port 5435 "Media Indexer PostgreSQL"
   report_port 8889 "Qwen Voice"
   report_port 8013 "Video Composer"
+  report_port 8014 "Thumbnail Director"
   report_port 8011 "Orchestrator API"
   report_port 5174 "Orchestrator frontend"
   report_port 5434 "Orchestrator PostgreSQL"
@@ -745,8 +763,9 @@ doctor() {
   check_url "Media Indexer" "http://127.0.0.1:8012/health/live" false || true
   check_url "Qwen Voice" "http://127.0.0.1:8889/health/live" false || true
   check_url "Video Composer" "http://127.0.0.1:8013/health/live" false || true
+  check_url "Thumbnail Director" "http://127.0.0.1:8014/health/live" false || true
   check_url "Orchestrator" "http://127.0.0.1:8011/health/live" false || true
-  for group in ideas-hub media-indexer orchestrator qwen3-tts-workshop video-composer; do
+  for group in ideas-hub media-indexer orchestrator qwen3-tts-workshop video-composer thumbnail-director; do
     count="$(docker ps --all --filter "label=com.docker.compose.project=$group" --quiet | wc -l)"
     current=$((current + count))
   done
@@ -773,6 +792,7 @@ logs_stack() {
   logs_group media-indexer
   logs_group qwen
   logs_group video-composer
+  logs_group thumbnail-director
   logs_group orchestrator
 }
 
@@ -840,6 +860,10 @@ restart_group() {
       validate_qwen_topology
       wait_http "Qwen liveness" "http://127.0.0.1:8889/health/live" 180
       wait_http "Qwen readiness" "http://127.0.0.1:8889/health/ready" 900
+      ;;
+    thumbnail-director)
+      compose thumbnail-director restart thumbnail-director
+      wait_http "Thumbnail Director" "http://127.0.0.1:8014/health/ready" 120
       ;;
     video-composer)
       compose video-composer restart video-composer

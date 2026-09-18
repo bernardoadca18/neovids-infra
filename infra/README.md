@@ -253,3 +253,14 @@ for the daemon to restart.
 
 TLS, authentication, and public rate limiting remain deployment concerns. The
 documented ports target a trusted local development network.
+
+## Thumbnail Director
+
+`thumbnail-director/` is a sixth independent service, served internally as
+`http://thumbnail-director:8000` and on localhost port **8014**. The CLI builds,
+starts, checks, stops and restarts it alongside the existing projects. Its persistent
+`thumbnail-artifacts` volume is preserved on shutdown. Gateway configuration reuses
+`NINEROUTER_BASE_URL` / `NINEROUTER_API_KEY` and `neovids-standard`; no local model is added.
+Orchestrator migration **021** owns thumbnail lifecycle, JSONB packages and human selection.
+The workflow's **Thumbnails** tab initiates generation; video production phases are unchanged.
+For a targeted restart use `./scripts/neovids restart thumbnail-director`.

@@ -1,0 +1,3 @@
+services:
+  thumbnail-director:
+    image: neovids-thumbnail-director:local

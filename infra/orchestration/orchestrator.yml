@@ -5,6 +5,8 @@ services:
       IDEAS_HUB_API_URL: http://ideas-hub:8000
       VOICE_API_URL: http://qwen-voice:8889
       MEDIA_INDEXER_API_URL: http://media-indexer:8000
+      THUMBNAIL_DIRECTOR_BASE_URL: http://thumbnail-director:8000
+      THUMBNAIL_DIRECTOR_TIMEOUT_SECONDS: 330
       VIDEO_COMPOSER_API_URL: http://video-composer:8013
     networks:
       default: {}
@@ -16,6 +18,8 @@ services:
       IDEAS_HUB_API_URL: http://ideas-hub:8000
       VOICE_API_URL: http://qwen-voice:8889
       MEDIA_INDEXER_API_URL: http://media-indexer:8000
+      THUMBNAIL_DIRECTOR_BASE_URL: http://thumbnail-director:8000
+      THUMBNAIL_DIRECTOR_TIMEOUT_SECONDS: 330
       VIDEO_COMPOSER_API_URL: http://video-composer:8013
     networks:
       default: {}
