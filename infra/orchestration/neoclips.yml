@@ -1,0 +1,96 @@
+services:
+  api:
+    image: neoclips-api:local
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8020"]
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      DATABASE_URL: postgresql+asyncpg://${NEOCLIPS_POSTGRES_USER:-neoclips}:${NEOCLIPS_POSTGRES_PASSWORD:-neoclips}@${NEOCLIPS_POSTGRES_HOST:-neoclips-db}:${NEOCLIPS_POSTGRES_PORT:-5432}/${NEOCLIPS_POSTGRES_DB:-neoclips}
+      REDIS_URL: redis://${NEOCLIPS_REDIS_HOST:-neoclips-redis}:${NEOCLIPS_REDIS_PORT:-6379}/0
+      CELERY_QUEUE_NAME: ${CELERY_QUEUE_NAME:-neoclips}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      MEDIA_INDEXER_BASE_URL: ${MEDIA_INDEXER_BASE_URL:-http://media-indexer:8000}
+      MEDIA_INDEXER_TIMEOUT_SECONDS: ${MEDIA_INDEXER_TIMEOUT_SECONDS:-30}
+      MEDIA_INDEXER_PROJECT_NAME: ${MEDIA_INDEXER_PROJECT_NAME:-NeoClips Managed Sources}
+      MEDIA_INDEXER_INITIAL_INDEX_TIMEOUT_SECONDS: ${MEDIA_INDEXER_INITIAL_INDEX_TIMEOUT_SECONDS:-600}
+      MEDIA_INDEXER_TRANSCRIPTION_TIMEOUT_SECONDS: ${MEDIA_INDEXER_TRANSCRIPTION_TIMEOUT_SECONDS:-1800}
+      MEDIA_INDEXER_POLL_INTERVAL_SECONDS: ${MEDIA_INDEXER_POLL_INTERVAL_SECONDS:-5}
+      NINE_ROUTER_BASE_URL: ${NINE_ROUTER_BASE_URL:-http://9router:20128}
+      NINE_ROUTER_API_KEY: ${NINE_ROUTER_API_KEY:-}
+      NINE_ROUTER_TIMEOUT_SECONDS: ${NINE_ROUTER_TIMEOUT_SECONDS:-120}
+      NINE_ROUTER_DISCOVERY_COMBO: ${NINE_ROUTER_DISCOVERY_COMBO:-neoclips-discovery}
+    networks:
+      default: {}
+      neovids:
+        aliases: [neoclips]
+    depends_on:
+      - db
+      - redis
+
+  worker:
+    image: neoclips-api:local
+    command: ["celery", "-A", "app.core.celery_app.celery_app", "worker", "-Q", "${CELERY_QUEUE_NAME:-neoclips}", "--concurrency=1", "-l", "info"]
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      DATABASE_URL: postgresql+asyncpg://${NEOCLIPS_POSTGRES_USER:-neoclips}:${NEOCLIPS_POSTGRES_PASSWORD:-neoclips}@${NEOCLIPS_POSTGRES_HOST:-neoclips-db}:${NEOCLIPS_POSTGRES_PORT:-5432}/${NEOCLIPS_POSTGRES_DB:-neoclips}
+      REDIS_URL: redis://${NEOCLIPS_REDIS_HOST:-neoclips-redis}:${NEOCLIPS_REDIS_PORT:-6379}/0
+      CELERY_QUEUE_NAME: ${CELERY_QUEUE_NAME:-neoclips}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      MEDIA_INDEXER_BASE_URL: ${MEDIA_INDEXER_BASE_URL:-http://media-indexer:8000}
+      MEDIA_INDEXER_TIMEOUT_SECONDS: ${MEDIA_INDEXER_TIMEOUT_SECONDS:-30}
+      MEDIA_INDEXER_PROJECT_NAME: ${MEDIA_INDEXER_PROJECT_NAME:-NeoClips Managed Sources}
+      MEDIA_INDEXER_INITIAL_INDEX_TIMEOUT_SECONDS: ${MEDIA_INDEXER_INITIAL_INDEX_TIMEOUT_SECONDS:-600}
+      MEDIA_INDEXER_TRANSCRIPTION_TIMEOUT_SECONDS: ${MEDIA_INDEXER_TRANSCRIPTION_TIMEOUT_SECONDS:-1800}
+      MEDIA_INDEXER_POLL_INTERVAL_SECONDS: ${MEDIA_INDEXER_POLL_INTERVAL_SECONDS:-5}
+      NINE_ROUTER_BASE_URL: ${NINE_ROUTER_BASE_URL:-http://9router:20128}
+      NINE_ROUTER_API_KEY: ${NINE_ROUTER_API_KEY:-}
+      NINE_ROUTER_TIMEOUT_SECONDS: ${NINE_ROUTER_TIMEOUT_SECONDS:-120}
+      NINE_ROUTER_DISCOVERY_COMBO: ${NINE_ROUTER_DISCOVERY_COMBO:-neoclips-discovery}
+    networks:
+      default: {}
+      neovids:
+        aliases: [neoclips-worker]
+    depends_on:
+      - db
+      - redis
+
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${NEOCLIPS_POSTGRES_USER:-neoclips}
+      POSTGRES_PASSWORD: ${NEOCLIPS_POSTGRES_PASSWORD:-neoclips}
+      POSTGRES_DB: ${NEOCLIPS_POSTGRES_DB:-neoclips}
+    volumes:
+      - neoclips-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${NEOCLIPS_POSTGRES_USER:-neoclips}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      default: {}
+      neovids:
+        aliases: [neoclips-db]
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - neoclips-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      default: {}
+      neovids:
+        aliases: [neoclips-redis]
+
+volumes:
+  neoclips-db-data:
+  neoclips-redis-data:
+
+networks:
+  neovids:
+    name: ${NEOVIDS_NETWORK:-neovids}
+    external: true
