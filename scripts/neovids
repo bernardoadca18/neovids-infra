@@ -444,6 +444,9 @@ build_missing_images() {
   if image_missing neovids-video-composer:stage16; then
     compose video-composer build video-composer
   fi
+  if image_missing neovids-neoclips-api:local; then
+    compose neoclips build api
+  fi
   if image_missing neovids-orchestrator-backend:local || \
     image_missing neovids-orchestrator-frontend:local; then
     compose orchestrator build api frontend
@@ -458,6 +461,7 @@ build_all() {
   compose qwen build qwen-tts
   compose video-composer build video-composer
   compose thumbnail-director build thumbnail-director
+  compose neoclips build api
   compose orchestrator build api frontend
 }
 
