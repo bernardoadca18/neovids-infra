@@ -27,7 +27,7 @@ Commands:
   build                  Build application images using existing lockfiles
   preflight-production   Read-only production readiness gate for a script
 
-Service groups: 9router, ideas-hub, media-indexer, qwen, video-composer, thumbnail-director, orchestrator
+Service groups: 9router, ideas-hub, media-indexer, qwen, video-composer, thumbnail-director, orchestrator, neoclips
 
 Resource options: --json, --watch [seconds]
 
@@ -101,6 +101,12 @@ compose() {
       project="video-composer"
       base="docker-compose.yml"
       override="video-composer.yml"
+      ;;
+    neoclips)
+      repo="neoclips"
+      project="neoclips"
+      base="docker-compose.yml"
+      override="neoclips.yml"
       ;;
     *)
       printf 'Unknown service group: %s\n' "$group" >&2
@@ -526,6 +532,10 @@ up_stack() {
   compose thumbnail-director up --detach --no-build thumbnail-director
   wait_http "Thumbnail Director" "http://127.0.0.1:8014/health/ready" 120
 
+  compose neoclips up --detach --no-build api worker
+  wait_http "NeoClips API" "http://127.0.0.1:8020/health/ready" 120
+  wait_container_health "NeoClips worker" "$(container_id neoclips worker)" 120
+
   compose orchestrator up --detach --no-build api worker frontend
   wait_http "Orchestrator API" "http://127.0.0.1:8011/health/live" 180
   wait_container_health "Orchestrator worker" "$(container_id orchestrator worker)" 180
@@ -539,6 +549,7 @@ up_stack() {
 down_stack() {
   require_docker
   compose orchestrator down --remove-orphans
+  compose neoclips down --remove-orphans
   compose thumbnail-director down --remove-orphans
   compose video-composer down --remove-orphans
   compose qwen down --remove-orphans
@@ -566,6 +577,7 @@ status_stack() {
   status_group 9router
   status_group ideas-hub
   status_group media-indexer
+  status_group neoclips
   status_group qwen
   status_group video-composer
   status_group thumbnail-director
@@ -692,6 +704,7 @@ health_stack() {
   validate_qwen_topology || failed=1
   check_url "Video Composer" "http://127.0.0.1:8013/health/ready" || failed=1
   check_url "Thumbnail Director" "http://127.0.0.1:8014/health/ready" || failed=1
+  check_url "NeoClips" "http://127.0.0.1:8020/health/ready" || failed=1
   check_url "Orchestrator" "http://127.0.0.1:8011/health/ready" || failed=1
   check_url "Ideas Hub frontend" "http://127.0.0.1:5173" || failed=1
   check_url "Orchestrator frontend" "http://127.0.0.1:5174" || failed=1
@@ -754,6 +767,7 @@ doctor() {
   report_port 8889 "Qwen Voice"
   report_port 8013 "Video Composer"
   report_port 8014 "Thumbnail Director"
+  report_port 8020 "NeoClips API"
   report_port 8011 "Orchestrator API"
   report_port 5174 "Orchestrator frontend"
   report_port 5434 "Orchestrator PostgreSQL"
@@ -764,8 +778,9 @@ doctor() {
   check_url "Qwen Voice" "http://127.0.0.1:8889/health/live" false || true
   check_url "Video Composer" "http://127.0.0.1:8013/health/live" false || true
   check_url "Thumbnail Director" "http://127.0.0.1:8014/health/live" false || true
+  check_url "NeoClips" "http://127.0.0.1:8020/health/live" false || true
   check_url "Orchestrator" "http://127.0.0.1:8011/health/live" false || true
-  for group in ideas-hub media-indexer orchestrator qwen3-tts-workshop video-composer thumbnail-director; do
+  for group in ideas-hub media-indexer neoclips orchestrator qwen3-tts-workshop video-composer thumbnail-director; do
     count="$(docker ps --all --filter "label=com.docker.compose.project=$group" --quiet | wc -l)"
     current=$((current + count))
   done
@@ -790,6 +805,7 @@ logs_stack() {
   logs_group 9router
   logs_group ideas-hub
   logs_group media-indexer
+  logs_group neoclips
   logs_group qwen
   logs_group video-composer
   logs_group thumbnail-director
@@ -875,6 +891,11 @@ restart_group() {
       wait_container_health "Orchestrator worker" "$(container_id orchestrator worker)" 180
       wait_http "Orchestrator frontend" "http://127.0.0.1:5174" 180
       wait_http "Orchestrator readiness" "http://127.0.0.1:8011/health/ready" 120
+      ;;
+    neoclips)
+      compose neoclips restart api worker
+      wait_http "NeoClips API" "http://127.0.0.1:8020/health/ready" 120
+      wait_container_health "NeoClips worker" "$(container_id neoclips worker)" 120
       ;;
     *) printf 'Unknown service group: %s\n' "$1" >&2; return 2 ;;
   esac
