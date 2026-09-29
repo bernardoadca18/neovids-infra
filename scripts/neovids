@@ -17,7 +17,8 @@ Usage: ./scripts/neovids <command> [service|option]
 
 Commands:
   doctor                 Safe, read-only host and dependency diagnostics
-  up [--build]           Start the stack; optionally rebuild all images first
+  up [--build] [--focus gamedev|pov]
+                         Start the full stack (default) or a production profile
   down                   Remove only NeoVids containers; preserve all data
   restart [service]      Restart the stack or one application group
   status [service]       Show Compose status
@@ -167,12 +168,10 @@ require_docker() {
 }
 
 required_volumes() {
-  printf '%s\n' \
-    ideas-hub-db-data \
-    media-indexer_media-indexer-db-data \
-    media-indexer_media-indexer-model-cache \
-    orchestrator-db-data \
-    video-composer_video-composer-data
+  printf '%s\n' ideas-hub-db-data orchestrator-db-data
+  if [[ "${STARTUP_FOCUS:-full}" != "gamedev" ]]; then
+    printf '%s\n' media-indexer_media-indexer-db-data media-indexer_media-indexer-model-cache video-composer_video-composer-data
+  fi
 }
 
 verify_volume_identity() {
@@ -219,7 +218,7 @@ prepare_installation() {
       ;;
     fresh)
       printf 'installation %-47s FRESH\n' "NeoVids durable state"
-      printf 'Compose will create the five canonical named volumes.\n'
+      printf 'Compose will create the required named volumes for %s.\n' "${STARTUP_FOCUS:-full}"
       initialize_fresh_bind_mounts
       ;;
     partial)
@@ -233,13 +232,15 @@ prepare_installation() {
 
 initialize_fresh_bind_mounts() {
   local paths=(
-    "$ROOT_DIR/media-indexer/storage"
     "$ROOT_DIR/orchestrator/data/audio"
     "$ROOT_DIR/orchestrator/cache/huggingface"
     "$ROOT_DIR/qwen3-tts-workshop/cache/huggingface"
     "$ROOT_DIR/qwen3-tts-workshop/data/jobs"
     "$ROOT_DIR/qwen3-tts-workshop/data/outputs"
   )
+  if [[ "${STARTUP_FOCUS:-full}" != "gamedev" ]]; then
+    paths+=("$ROOT_DIR/media-indexer/storage")
+  fi
   local path
   for path in "${paths[@]}"; do
     mkdir -p "$path"
@@ -250,7 +251,6 @@ initialize_fresh_bind_mounts() {
 verify_bind_mounts() {
   local missing=0 path
   local paths=(
-    "$ROOT_DIR/media-indexer/storage"
     "$ROOT_DIR/orchestrator/data/audio"
     "$ROOT_DIR/orchestrator/cache/huggingface"
     "$ROOT_DIR/qwen3-tts-workshop/cache/huggingface"
@@ -258,6 +258,9 @@ verify_bind_mounts() {
     "$ROOT_DIR/qwen3-tts-workshop/data/jobs"
     "$ROOT_DIR/qwen3-tts-workshop/data/outputs"
   )
+  if [[ "${STARTUP_FOCUS:-full}" != "gamedev" ]]; then
+    paths+=("$ROOT_DIR/media-indexer/storage")
+  fi
   for path in "${paths[@]}"; do
     if [[ -d "$path" ]]; then
       printf 'bind   %-52s OK\n' "${path#"$ROOT_DIR/"}"
@@ -354,13 +357,16 @@ database_count() {
 verify_database_contents() {
   local ideas_db media_db orchestrator_db
   ideas_db="$(container_id ideas-hub db)"
-  media_db="$(container_id media-indexer db)"
   orchestrator_db="$(container_id orchestrator db)"
-  [[ -n "$ideas_db" && -n "$media_db" && -n "$orchestrator_db" ]]
+  [[ -n "$ideas_db" && -n "$orchestrator_db" ]]
 
   printf 'Ideas Hub ideias=%s\n' "$(database_count "$ideas_db" ideias)"
-  printf 'Media Indexer sessions=%s\n' "$(database_count "$media_db" media_sessions)"
   printf 'Orchestrator workflows=%s\n' "$(database_count "$orchestrator_db" workflow_execucoes)"
+  if [[ "${STARTUP_FOCUS:-full}" != "gamedev" ]]; then
+    media_db="$(container_id media-indexer db)"
+    [[ -n "$media_db" ]]
+    printf 'Media Indexer sessions=%s\n' "$(database_count "$media_db" media_sessions)"
+  fi
 }
 
 backup_databases() {
@@ -370,17 +376,19 @@ backup_databases() {
   umask 077
   mkdir -p "$destination"
   ideas_db="$(container_id ideas-hub db)"
-  media_db="$(container_id media-indexer db)"
   orchestrator_db="$(container_id orchestrator db)"
   docker exec "$ideas_db" sh -ceu \
     'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' \
     >"$destination/ideas-hub.dump"
-  docker exec "$media_db" sh -ceu \
-    'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' \
-    >"$destination/media-indexer.dump"
   docker exec "$orchestrator_db" sh -ceu \
     'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' \
     >"$destination/orchestrator.dump"
+  if [[ "${STARTUP_FOCUS:-full}" != "gamedev" ]]; then
+    media_db="$(container_id media-indexer db)"
+    docker exec "$media_db" sh -ceu \
+      'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' \
+      >"$destination/media-indexer.dump"
+  fi
   printf 'Database backups: %s\n' "$destination"
 }
 
@@ -405,13 +413,15 @@ detect_pending_migrations() {
     PENDING_MIGRATIONS+=("ideas-hub:backend")
     printf 'migration %-50s PENDING\n' "ideas-hub"
   fi
-  if migration_is_current media-indexer api; then
-    printf 'migration %-50s CURRENT\n' "media-indexer"
-  else
-    status=$?
-    ((status == 1)) || return "$status"
-    PENDING_MIGRATIONS+=("media-indexer:api")
-    printf 'migration %-50s PENDING\n' "media-indexer"
+  if [[ "${STARTUP_FOCUS:-full}" != "gamedev" ]]; then
+    if migration_is_current media-indexer api; then
+      printf 'migration %-50s CURRENT\n' "media-indexer"
+    else
+      status=$?
+      ((status == 1)) || return "$status"
+      PENDING_MIGRATIONS+=("media-indexer:api")
+      printf 'migration %-50s PENDING\n' "media-indexer"
+    fi
   fi
   if migration_is_current orchestrator api; then
     printf 'migration %-50s CURRENT\n' "orchestrator"
@@ -432,20 +442,24 @@ build_missing_images() {
     image_missing neovids-ideas-hub-frontend:local; then
     compose ideas-hub build backend frontend
   fi
-  if image_missing neovids-media-indexer:local; then
-    compose media-indexer build api
+  if [[ "${STARTUP_FOCUS:-full}" != "gamedev" ]]; then
+    if image_missing neovids-media-indexer:local; then
+      compose media-indexer build api
+    fi
   fi
   if image_missing neovids-qwen-voice:local; then
     compose qwen build qwen-tts
   fi
-  if image_missing neovids-thumbnail-director:local; then
-    compose thumbnail-director build thumbnail-director
-  fi
-  if image_missing neovids-video-composer:stage16; then
+  if [[ "${STARTUP_FOCUS:-full}" != "gamedev" ]] && image_missing neovids-video-composer:stage16; then
     compose video-composer build video-composer
   fi
-  if image_missing neovids-neoclips-api:local; then
-    compose neoclips build api
+  if [[ "${STARTUP_FOCUS:-full}" == "full" ]]; then
+    if image_missing neovids-thumbnail-director:local; then
+      compose thumbnail-director build thumbnail-director
+    fi
+    if image_missing neovids-neoclips-api:local; then
+      compose neoclips build api
+    fi
   fi
   if image_missing neovids-orchestrator-backend:local || \
     image_missing neovids-orchestrator-frontend:local; then
@@ -457,11 +471,15 @@ build_all() {
   require_docker
   ensure_network
   compose ideas-hub build backend frontend
-  compose media-indexer build api
   compose qwen build qwen-tts
-  compose video-composer build video-composer
-  compose thumbnail-director build thumbnail-director
-  compose neoclips build api
+  if [[ "${STARTUP_FOCUS:-full}" != "gamedev" ]]; then
+    compose media-indexer build api
+    compose video-composer build video-composer
+  fi
+  if [[ "${STARTUP_FOCUS:-full}" == "full" ]]; then
+    compose thumbnail-director build thumbnail-director
+    compose neoclips build api
+  fi
   compose orchestrator build api frontend
 }
 
@@ -476,37 +494,53 @@ run_pending_migrations() {
 }
 
 up_stack() {
-  local option="${1:-}"
-  if [[ -n "$option" && "$option" != "--build" ]]; then
-    printf 'Unknown up option: %s\n' "$option" >&2
-    return 2
-  fi
+  local rebuild=false
+  STARTUP_FOCUS=full
+  while (($#)); do
+    case "$1" in
+      --build) rebuild=true; shift ;;
+      --focus)
+        [[ -n "${2:-}" ]] || { printf 'Missing value for --focus.\n' >&2; return 2; }
+        case "$2" in
+          gamedev|pov) STARTUP_FOCUS="$2" ;;
+          *) printf 'Unknown focus: %s\n' "$2" >&2; return 2 ;;
+        esac
+        shift 2
+        ;;
+      *) printf 'Unknown up option: %s\n' "$1" >&2; return 2 ;;
+    esac
+  done
   require_docker
   require_command curl
-  validate_media_indexer_hdd_host_path
+  if [[ "$STARTUP_FOCUS" != "gamedev" ]]; then validate_media_indexer_hdd_host_path; fi
   prepare_installation
   ensure_network
-  start_model_gateway
+  if [[ "$STARTUP_FOCUS" == "full" ]]; then start_model_gateway; fi
 
   compose ideas-hub up --detach db
-  compose media-indexer up --detach db
+  if [[ "$STARTUP_FOCUS" != "gamedev" ]]; then compose media-indexer up --detach db; fi
   compose orchestrator up --detach db redis
   wait_container_health "Ideas Hub PostgreSQL" "$(container_id ideas-hub db)" 90
-  wait_container_health "Media PostgreSQL" "$(container_id media-indexer db)" 90
+  if [[ "$STARTUP_FOCUS" != "gamedev" ]]; then
+    wait_container_health "Media PostgreSQL" "$(container_id media-indexer db)" 90
+  fi
   wait_container_health "Orchestrator PostgreSQL" "$(container_id orchestrator db)" 90
   wait_container_health "Orchestrator Redis" "$(container_id orchestrator redis)" 60
   if [[ "$INSTALLATION_MODE" == "existing" ]]; then
     verify_database_contents
   fi
 
-  if [[ "$option" == "--build" ]]; then
+  if [[ "$rebuild" == "true" ]]; then
     build_all
   else
     build_missing_images
   fi
 
   if [[ "$INSTALLATION_MODE" == "fresh" ]]; then
-    PENDING_MIGRATIONS=("ideas-hub:backend" "media-indexer:api" "orchestrator:api")
+    PENDING_MIGRATIONS=("ideas-hub:backend" "orchestrator:api")
+    if [[ "$STARTUP_FOCUS" != "gamedev" ]]; then
+      PENDING_MIGRATIONS+=("media-indexer:api")
+    fi
     printf 'Fresh installation: initializing database schemas without backup.\n'
   else
     detect_pending_migrations
@@ -518,36 +552,51 @@ up_stack() {
   fi
   run_pending_migrations
 
-  compose ideas-hub up --detach --no-build backend frontend generation-worker
+  if [[ "$STARTUP_FOCUS" == "full" ]]; then
+    compose ideas-hub up --detach --no-build backend frontend generation-worker
+  else
+    compose ideas-hub up --detach --no-build backend frontend
+  fi
   wait_http "Ideas Hub API" "http://127.0.0.1:8000/health/ready" 120
   wait_http "Ideas Hub frontend" "http://127.0.0.1:5173" 120
 
-  compose media-indexer up --detach --no-build api
-  wait_http "Media Indexer" "http://127.0.0.1:8012/health/ready" 180
+  if [[ "$STARTUP_FOCUS" != "gamedev" ]]; then
+    compose media-indexer up --detach --no-build api
+    wait_http "Media Indexer" "http://127.0.0.1:8012/health/ready" 180
+  fi
 
   compose qwen up --detach --no-build qwen-tts
   validate_qwen_topology
   wait_http "Qwen liveness" "http://127.0.0.1:8889/health/live" 180
   wait_http "Qwen readiness" "http://127.0.0.1:8889/health/ready" 900
 
-  compose video-composer up --detach --no-build video-composer
-  wait_http "Video Composer" "http://127.0.0.1:8013/health/ready" 300
+  if [[ "$STARTUP_FOCUS" != "gamedev" ]]; then
+    compose video-composer up --detach --no-build video-composer
+    wait_http "Video Composer" "http://127.0.0.1:8013/health/ready" 300
+  fi
 
-  compose thumbnail-director up --detach --no-build thumbnail-director
-  wait_http "Thumbnail Director" "http://127.0.0.1:8014/health/ready" 120
+  if [[ "$STARTUP_FOCUS" == "full" ]]; then
+    compose thumbnail-director up --detach --no-build thumbnail-director
+    wait_http "Thumbnail Director" "http://127.0.0.1:8014/health/ready" 120
 
-  compose neoclips up --detach --no-build api worker
-  wait_http "NeoClips API" "http://127.0.0.1:8020/health/ready" 120
-  wait_container_health "NeoClips worker" "$(container_id neoclips worker)" 120
+    compose neoclips up --detach --no-build api worker
+    wait_http "NeoClips API" "http://127.0.0.1:8020/health/ready" 120
+    wait_container_health "NeoClips worker" "$(container_id neoclips worker)" 120
+  fi
 
-  compose orchestrator up --detach --no-build api worker frontend
+  compose orchestrator up --detach --no-build api worker control-worker frontend
   wait_http "Orchestrator API" "http://127.0.0.1:8011/health/live" 180
   wait_container_health "Orchestrator worker" "$(container_id orchestrator worker)" 180
+  wait_container_health "Orchestrator control" "$(container_id orchestrator control-worker)" 180
   wait_http "Orchestrator frontend" "http://127.0.0.1:5174" 180
-  wait_http "Orchestrator readiness" "http://127.0.0.1:8011/health/ready" 120
+  wait_http "Orchestrator readiness" "http://127.0.0.1:8011/health/ready?focus=$STARTUP_FOCUS" 120
 
-  health_stack
-  status_stack
+  health_stack "$STARTUP_FOCUS"
+  if [[ "$STARTUP_FOCUS" == "full" ]]; then
+    status_stack
+  else
+    status_stack "$STARTUP_FOCUS"
+  fi
 }
 
 down_stack() {
@@ -574,6 +623,14 @@ status_group() {
 
 status_stack() {
   local selected="${1:-}"
+  if [[ "$selected" == "gamedev" || "$selected" == "pov" ]]; then
+    status_group ideas-hub
+    if [[ "$selected" == "pov" ]]; then status_group media-indexer; fi
+    status_group qwen
+    if [[ "$selected" == "pov" ]]; then status_group video-composer; fi
+    status_group orchestrator
+    return
+  fi
   if [[ -n "$selected" ]]; then
     status_group "$selected"
     return
@@ -697,19 +754,28 @@ report_port() {
 
 health_stack() {
   require_command curl
+  local focus="${1:-full}"
   local failed=0
-  check_url "9Router" "$NINEROUTER_HOST_BASE_URL/api/health" || failed=1
-  check_ninerouter_contract || failed=1
-  check_ollama_contract || failed=1
-  wait_container_health "Headroom" "$(router_compose ps --quiet headroom)" 5 || failed=1
+  if [[ "$focus" == "full" ]]; then
+    check_url "9Router" "$NINEROUTER_HOST_BASE_URL/api/health" || failed=1
+    check_ninerouter_contract || failed=1
+    check_ollama_contract || failed=1
+    wait_container_health "Headroom" "$(router_compose ps --quiet headroom)" 5 || failed=1
+  fi
   check_url "Ideas Hub" "http://127.0.0.1:8000/health/ready" || failed=1
-  check_url "Media Indexer" "http://127.0.0.1:8012/health/ready" || failed=1
+  if [[ "$focus" != "gamedev" ]]; then
+    check_url "Media Indexer" "http://127.0.0.1:8012/health/ready" || failed=1
+  fi
   check_url "Qwen Voice" "http://127.0.0.1:8889/health/ready" || failed=1
   validate_qwen_topology || failed=1
-  check_url "Video Composer" "http://127.0.0.1:8013/health/ready" || failed=1
-  check_url "Thumbnail Director" "http://127.0.0.1:8014/health/ready" || failed=1
-  check_url "NeoClips" "http://127.0.0.1:8020/health/ready" || failed=1
-  check_url "Orchestrator" "http://127.0.0.1:8011/health/ready" || failed=1
+  if [[ "$focus" != "gamedev" ]]; then
+    check_url "Video Composer" "http://127.0.0.1:8013/health/ready" || failed=1
+  fi
+  if [[ "$focus" == "full" ]]; then
+    check_url "Thumbnail Director" "http://127.0.0.1:8014/health/ready" || failed=1
+    check_url "NeoClips" "http://127.0.0.1:8020/health/ready" || failed=1
+  fi
+  check_url "Orchestrator" "http://127.0.0.1:8011/health/ready?focus=$focus" || failed=1
   check_url "Ideas Hub frontend" "http://127.0.0.1:5173" || failed=1
   check_url "Orchestrator frontend" "http://127.0.0.1:5174" || failed=1
   return "$failed"
@@ -890,9 +956,10 @@ restart_group() {
       wait_http "Video Composer" "http://127.0.0.1:8013/health/ready" 300
       ;;
     orchestrator)
-      compose orchestrator restart api worker frontend
+      compose orchestrator restart api worker control-worker frontend
       wait_http "Orchestrator API" "http://127.0.0.1:8011/health/live" 180
       wait_container_health "Orchestrator worker" "$(container_id orchestrator worker)" 180
+      wait_container_health "Orchestrator control" "$(container_id orchestrator control-worker)" 180
       wait_http "Orchestrator frontend" "http://127.0.0.1:5174" 180
       wait_http "Orchestrator readiness" "http://127.0.0.1:8011/health/ready" 120
       ;;
@@ -910,8 +977,8 @@ main() {
   case "$command" in
     doctor) doctor ;;
     up)
-      [[ $# -le 2 ]] || { usage >&2; return 2; }
-      up_stack "${2:-}"
+      shift
+      up_stack "$@"
       ;;
     down) down_stack ;;
     restart)

@@ -12,7 +12,7 @@ services:
       default: {}
       neovids:
         aliases: [orchestrator-api]
-  worker:
+  worker: &orchestrator-worker
     image: neovids-orchestrator-backend:local
     environment:
       IDEAS_HUB_API_URL: http://ideas-hub:8000
@@ -24,6 +24,8 @@ services:
     networks:
       default: {}
       neovids: {}
+  control-worker:
+    <<: *orchestrator-worker
   frontend:
     image: neovids-orchestrator-frontend:local
 
